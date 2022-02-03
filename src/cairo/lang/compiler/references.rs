@@ -4,7 +4,7 @@
 ///
 /// For example,
 ///
-/// ```
+/// ```cairo
 ///   let x = ap   # Defines a reference to ap, that is attached to the following instruction.
 ///   [ap] = 5; ap++
 ///   # Since ap increased, the reference evaluated now should be (ap - 1), rather than ap.
