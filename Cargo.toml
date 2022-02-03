@@ -1,0 +1,11 @@
+[package]
+name = "oriac"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+num-bigint = "0.4.3"
+serde = { version = "1.0.136", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.78"
