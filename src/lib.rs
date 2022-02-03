@@ -1,13 +1,3 @@
-pub mod debug_info;
+#![allow(clippy::module_inception)]
 
-pub mod flow;
-
-pub mod identifier_manager;
-
-pub mod preprocessor;
-
-pub mod program;
-
-pub mod references;
-
-pub mod scoped_name;
+pub mod cairo;

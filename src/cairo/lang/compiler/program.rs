@@ -1,6 +1,8 @@
-use crate::{
-    debug_info::DebugInfo, flow::ReferenceManager, identifier_manager::IdentifierManager,
-    preprocessor::AttributeScope, scoped_name::ScopedName,
+use crate::cairo::lang::compiler::{
+    debug_info::DebugInfo,
+    identifier_manager::IdentifierManager,
+    preprocessor::{flow::ReferenceManager, preprocessor::AttributeScope},
+    scoped_name::ScopedName,
 };
 
 use num_bigint::BigInt;
