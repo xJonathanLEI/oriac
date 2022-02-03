@@ -1,3 +1,5 @@
+use serde::Deserialize;
+
 /// A reference to a memory address that is defined for a specific location in the program (pc).
 /// The reference may be evaluated for other locations in the program, as long as its value is well
 /// defined.
@@ -11,4 +13,5 @@
 ///   [ap] = [x] * 2; ap++ # Thus, this instruction will translate to '[ap] = [ap - 1] * 2; ap++'
 ///                        # and will set [ap] to 10.
 /// ```
+#[derive(Debug, Deserialize)]
 pub struct Reference {}
