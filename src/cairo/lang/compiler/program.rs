@@ -2,7 +2,10 @@ use crate::{
     cairo::lang::compiler::{
         debug_info::DebugInfo,
         identifier_manager::IdentifierManager,
-        preprocessor::{flow::ReferenceManager, preprocessor::AttributeScope},
+        preprocessor::{
+            flow::{FlowTrackingDataActual, ReferenceManager},
+            preprocessor::AttributeScope,
+        },
         scoped_name::ScopedName,
     },
     serde::big_int::BigIntHex,
@@ -16,10 +19,8 @@ use std::collections::HashMap;
 #[derive(Debug, Deserialize)]
 pub struct CairoHint {
     pub code: String,
-    // accessible_scopes: List[ScopedName] = field(
-    //     metadata=dict(marshmallow_field=mfields.List(ScopedNameAsStr))
-    // )
-    // flow_tracking_data: FlowTrackingDataActual
+    pub accessible_scopes: Vec<ScopedName>,
+    pub flow_tracking_data: FlowTrackingDataActual,
 }
 
 pub struct ProgramBase {
