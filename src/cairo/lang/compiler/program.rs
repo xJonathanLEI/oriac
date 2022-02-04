@@ -108,4 +108,14 @@ mod tests {
         ))
         .unwrap();
     }
+
+    #[test]
+    fn test_program_main() {
+        let program = serde_json::from_str::<Program>(include_str!(
+            "../../../../test-data/artifacts/run_past_end.json"
+        ))
+        .unwrap();
+
+        assert_eq!(program.main(), Some(BigInt::from(0)));
+    }
 }
