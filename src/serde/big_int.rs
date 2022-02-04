@@ -4,6 +4,8 @@ use serde_with::{DeserializeAs, SerializeAs};
 
 pub struct BigIntHex;
 
+pub struct BigIntNumber;
+
 impl SerializeAs<BigInt> for BigIntHex {
     fn serialize_as<S>(value: &BigInt, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -21,6 +23,25 @@ impl<'de> DeserializeAs<'de, BigInt> for BigIntHex {
         let value = String::deserialize(deserializer)?;
         utils::big_int_from_hex(&value)
             .map_err(|err| DeError::custom(format!("invalid hex string: {}", err)))
+    }
+}
+
+impl SerializeAs<BigInt> for BigIntNumber {
+    fn serialize_as<S>(value: &BigInt, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("{}", value))
+    }
+}
+
+impl<'de> DeserializeAs<'de, BigInt> for BigIntNumber {
+    fn deserialize_as<D>(deserializer: D) -> Result<BigInt, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        Ok(BigInt::from(value))
     }
 }
 

@@ -1,7 +1,10 @@
+use crate::{cairo::lang::compiler::scoped_name::ScopedName, serde::big_int::BigIntNumber};
+
+use num_bigint::BigInt;
 use serde::Deserialize;
+use serde_with::serde_as;
 
-use crate::cairo::lang::compiler::scoped_name::ScopedName;
-
+#[serde_as]
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IdentifierDefinition {
@@ -21,10 +24,12 @@ pub enum IdentifierDefinition {
     ///```
     Struct,
     Label {
-        pc: u64,
+        #[serde_as(as = "BigIntNumber")]
+        pc: BigInt,
     },
     Function {
-        pc: u64,
+        #[serde_as(as = "BigIntNumber")]
+        pc: BigInt,
     },
     Namespace,
     Reference,

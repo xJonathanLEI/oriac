@@ -81,7 +81,7 @@ impl Program {
         result.map(|result| result.identifier_definition)
     }
 
-    pub fn get_label(&self, name: ScopedName, full_name_lookup: bool) -> Option<u64> {
+    pub fn get_label(&self, name: ScopedName, full_name_lookup: bool) -> Option<BigInt> {
         match self.get_identifier(name, "label", full_name_lookup) {
             Ok(value) => match value {
                 IdentifierDefinition::Label { pc, .. } => Some(pc),
@@ -92,7 +92,7 @@ impl Program {
         }
     }
 
-    pub fn main(&self) -> Option<u64> {
+    pub fn main(&self) -> Option<BigInt> {
         self.get_label(ScopedName::new(vec![String::from("main")]).unwrap(), false)
     }
 }
