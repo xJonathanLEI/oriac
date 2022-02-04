@@ -1,7 +1,7 @@
 use serde::{de::Error as DeError, Deserialize, Serialize, Serializer};
-use std::{fmt::Display, str::FromStr};
+use std::{fmt::Display, ops::Range, str::FromStr};
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct ScopedName {
     pub path: Vec<String>,
 }
@@ -22,6 +22,55 @@ impl ScopedName {
             }
         }
         Ok(Self { path })
+    }
+
+    pub fn len(&self) -> usize {
+        self.path.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn slice(&self, range: Range<usize>) -> Self {
+        Self {
+            path: self.path[range]
+                .iter()
+                .map(|item| item.to_owned())
+                .collect::<Vec<_>>(),
+        }
+    }
+
+    pub fn startswith(&self, other: &ScopedName) -> bool {
+        if self.len() < other.len() {
+            false
+        } else {
+            self.path[0..other.len()] == other.path
+        }
+    }
+}
+
+impl std::ops::Add<String> for &ScopedName {
+    type Output = ScopedName;
+
+    fn add(self, rhs: String) -> Self::Output {
+        let mut path = self.path.clone();
+        path.push(rhs);
+
+        ScopedName { path }
+    }
+}
+
+impl std::ops::Add<&ScopedName> for &ScopedName {
+    type Output = ScopedName;
+
+    fn add(self, rhs: &ScopedName) -> Self::Output {
+        let mut path = self.path.clone();
+        for segment in rhs.path.iter() {
+            path.push(segment.to_owned());
+        }
+
+        ScopedName { path }
     }
 }
 

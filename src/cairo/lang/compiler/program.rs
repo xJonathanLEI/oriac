@@ -1,7 +1,8 @@
 use crate::{
     cairo::lang::compiler::{
         debug_info::DebugInfo,
-        identifier_manager::IdentifierManager,
+        identifier_definition::IdentifierDefinition,
+        identifier_manager::{IdentifierError, IdentifierManager},
         preprocessor::{
             flow::{FlowTrackingDataActual, ReferenceManager},
             preprocessor::AttributeScope,
@@ -54,6 +55,46 @@ pub struct Program {
     pub reference_manager: ReferenceManager,
     pub attributes: Vec<AttributeScope>,
     pub debug_info: Option<DebugInfo>,
+}
+
+impl Program {
+    pub fn get_identifier(
+        &self,
+        name: ScopedName,
+        _expected_type: &'static str,
+        full_name_lookup: bool,
+    ) -> Result<IdentifierDefinition, IdentifierError> {
+        let result = if full_name_lookup {
+            self.identifiers.root.get(name)
+        } else {
+            self.identifiers.search(&[self.main_scope.clone()], name)
+        };
+
+        // TODO: implement these Python lines
+        // result.assert_fully_parsed()
+        // identifier_definition = result.identifier_definition
+        // assert isinstance(identifier_definition, expected_type), (
+        //     f"'{scoped_name}' is expected to be {expected_type.TYPE}, "
+        //     + f"found {identifier_definition.TYPE}."  # type: ignore
+        // )  # type: ignore
+
+        result.map(|result| result.identifier_definition)
+    }
+
+    pub fn get_label(&self, name: ScopedName, full_name_lookup: bool) -> Option<u64> {
+        match self.get_identifier(name, "label", full_name_lookup) {
+            Ok(value) => match value {
+                IdentifierDefinition::Label { pc, .. } => Some(pc),
+                IdentifierDefinition::Function { pc, .. } => Some(pc),
+                _ => None,
+            },
+            Err(_) => None,
+        }
+    }
+
+    pub fn main(&self) -> Option<u64> {
+        self.get_label(ScopedName::new(vec![String::from("main")]).unwrap(), false)
+    }
 }
 
 #[cfg(test)]

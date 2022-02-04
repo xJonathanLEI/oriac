@@ -1,6 +1,7 @@
 pub mod preprocessor;
 
 pub mod debug_info;
+pub mod identifier_definition;
 pub mod identifier_manager;
 pub mod program;
 pub mod references;
