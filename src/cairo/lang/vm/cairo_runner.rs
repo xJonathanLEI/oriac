@@ -28,6 +28,8 @@ pub struct CairoRunner {
     /// A set of memory addresses accessed by the VM, after relocation of temporary segments into
     /// real ones.
     pub accessed_addresses: Option<HashSet<RelocatableValue>>,
+    pub program_base: Option<RelocatableValue>,
+    pub execution_base: Option<RelocatableValue>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -124,6 +126,50 @@ impl CairoRunner {
             run_ended: false,
             segments_finalized: false,
             accessed_addresses: None,
+            program_base: None,
+            execution_base: None,
         })
+    }
+
+    pub fn initialize_segments(&mut self) {
+        // Program segment.
+        self.program_base = Some(self.segments.add(None));
+
+        // Execution segment.
+        self.execution_base = Some(self.segments.add(None));
+
+        // TODO: implement the following Python code
+        //
+        // ```python
+        // # Builtin segments.
+        // for builtin_runner in self.builtin_runners.values():
+        //     builtin_runner.initialize_segments(self)
+        // ```
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::cairo::lang::compiler::program::Program;
+
+    #[test]
+    fn run() {
+        let program = serde_json::from_str::<Program>(include_str!(
+            "../../../../test-data/artifacts/run_past_end.json"
+        ))
+        .unwrap();
+
+        let mut runner = CairoRunner::new(
+            program.into(),
+            CairoLayout::plain_instance(),
+            MemoryDict::new(),
+            false,
+            false,
+        )
+        .unwrap();
+
+        runner.initialize_segments();
     }
 }

@@ -1,8 +1,7 @@
-use std::collections::HashMap;
+use crate::cairo::lang::vm::{memory_dict::MemoryDict, relocatable::RelocatableValue};
 
 use num_bigint::BigInt;
-
-use crate::cairo::lang::vm::memory_dict::MemoryDict;
+use std::collections::HashMap;
 
 /// Manages the list of memory segments, and allows relocating them once their sizes are known.
 #[derive(Debug)]
@@ -32,5 +31,36 @@ impl MemorySegmentManager {
             public_memory_offsets: HashMap::new(),
             n_temp_segments: 0u32.into(),
         }
+    }
+
+    /// Adds a new segment and returns its starting location as a RelocatableValue. If size is not
+    /// None the segment is finalized with the given size.
+    pub fn add(&mut self, size: Option<BigInt>) -> RelocatableValue {
+        let segment_index = self.n_segments.clone();
+        self.n_segments += BigInt::from(1);
+
+        if let Some(size) = size {
+            self.finalize(segment_index.clone(), Some(size), vec![]);
+        }
+
+        RelocatableValue::new(segment_index, 0u32.into())
+    }
+
+    /// Writes the following information for the given segment:
+    /// * size - The size of the segment (to be used in relocate_segments).
+    /// * public_memory - A list of offsets for memory cells that will be considered as public
+    /// memory.
+    pub fn finalize(
+        &mut self,
+        segment_index: BigInt,
+        size: Option<BigInt>,
+        public_memory: Vec<[BigInt; 2]>,
+    ) {
+        if let Some(size) = size {
+            self.segment_sizes.insert(segment_index.clone(), size);
+        }
+
+        self.public_memory_offsets
+            .insert(segment_index, public_memory);
     }
 }
