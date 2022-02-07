@@ -24,6 +24,7 @@ pub struct CairoHint {
     pub flow_tracking_data: FlowTrackingDataActual,
 }
 
+#[derive(Debug)]
 pub struct ProgramBase {
     pub prime: BigInt,
     pub data: Vec<BigInt>,
@@ -94,6 +95,18 @@ impl Program {
 
     pub fn main(&self) -> Option<BigInt> {
         self.get_label(ScopedName::new(vec![String::from("main")]).unwrap(), false)
+    }
+}
+
+impl From<Program> for ProgramBase {
+    fn from(value: Program) -> Self {
+        let main = value.main();
+        Self {
+            prime: value.prime,
+            data: value.data,
+            builtins: value.builtins,
+            main,
+        }
     }
 }
 
