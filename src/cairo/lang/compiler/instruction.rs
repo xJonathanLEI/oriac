@@ -1,10 +1,15 @@
 use num_bigint::BigInt;
 
+pub const OFFSET_BITS: u32 = 16;
+const N_FLAGS: u32 = 15;
+
+#[derive(Debug)]
 pub enum Register {
     AP = 0,
     FP = 1,
 }
 
+#[derive(Debug)]
 pub enum Op1Addr {
     /// op1 = [pc + 1].
     IMM = 0,
@@ -16,6 +21,7 @@ pub enum Op1Addr {
     OP0 = 3,
 }
 
+#[derive(Debug)]
 pub enum Res {
     /// res = operand_1.
     OP1 = 0,
@@ -29,6 +35,7 @@ pub enum Res {
 
 /// Flags for register update.
 #[allow(non_camel_case_types)]
+#[derive(Debug)]
 pub enum PcUpdate {
     /// Next pc: pc + op_size.
     REGULAR = 0,
@@ -40,6 +47,7 @@ pub enum PcUpdate {
     JNZ = 3,
 }
 
+#[derive(Debug)]
 pub enum ApUpdate {
     /// Next ap: ap.
     REGULAR = 0,
@@ -52,6 +60,7 @@ pub enum ApUpdate {
 }
 
 #[allow(non_camel_case_types)]
+#[derive(Debug)]
 pub enum FpUpdate {
     /// Next fp: fp.
     REGULAR = 0,
@@ -62,6 +71,7 @@ pub enum FpUpdate {
 }
 
 #[allow(non_camel_case_types)]
+#[derive(Debug)]
 pub enum Opcode {
     NOP = 0,
     ASSERT_EQ = 1,
@@ -69,6 +79,7 @@ pub enum Opcode {
     RET = 3,
 }
 
+#[derive(Debug)]
 pub struct Instruction {
     /// Offset. In the range [-2**15, 2*15) = [-2**(OFFSET_BITS-1), 2**(OFFSET_BITS-1)).
     pub off0: i16,
@@ -98,4 +109,29 @@ impl Instruction {
             1
         }
     }
+}
+
+/// Returns a tuple (flags, off0, off1, off2) according to the given encoded instruction.
+pub fn decode_instruction_values(encoded_instruction: &BigInt) -> (BigInt, u16, u16, u16) {
+    // TODO: switch to proper error handling
+    if encoded_instruction < &BigInt::from(0)
+        || encoded_instruction >= &BigInt::from(2u128.pow(3 * OFFSET_BITS + N_FLAGS))
+    {
+        panic!("Unsupported instruction.");
+    }
+
+    let off0: u16 = (encoded_instruction & BigInt::from(2u32.pow(OFFSET_BITS) - 1))
+        .try_into()
+        .unwrap();
+    let off1: u16 = ((encoded_instruction >> OFFSET_BITS)
+        & BigInt::from(2u32.pow(OFFSET_BITS) - 1))
+    .try_into()
+    .unwrap();
+    let off2: u16 = ((encoded_instruction >> (2 * OFFSET_BITS))
+        & BigInt::from(2u32.pow(OFFSET_BITS) - 1))
+    .try_into()
+    .unwrap();
+    let flags_val = encoded_instruction >> (3 * OFFSET_BITS);
+
+    (flags_val, off0, off1, off2)
 }
