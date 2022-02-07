@@ -1,4 +1,7 @@
-use crate::cairo::lang::vm::{memory_dict::MemoryDict, relocatable::RelocatableValue};
+use crate::cairo::lang::vm::{
+    memory_dict::MemoryDict,
+    relocatable::{MaybeRelocatable, RelocatableValue},
+};
 
 use num_bigint::BigInt;
 use std::collections::HashMap;
@@ -62,5 +65,18 @@ impl MemorySegmentManager {
 
         self.public_memory_offsets
             .insert(segment_index, public_memory);
+    }
+
+    /// Writes data into the memory at address ptr and returns the first address after the data.
+    pub fn load_data(
+        &mut self,
+        ptr: RelocatableValue,
+        data: &[MaybeRelocatable],
+    ) -> RelocatableValue {
+        for (i, v) in data.iter().enumerate() {
+            self.memory
+                .insert(ptr.clone() + &BigInt::from(i), v.to_owned());
+        }
+        ptr + &BigInt::from(data.len())
     }
 }

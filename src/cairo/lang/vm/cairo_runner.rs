@@ -2,8 +2,10 @@ use crate::cairo::lang::{
     compiler::program::ProgramBase,
     instances::CairoLayout,
     vm::{
-        builtin_runner::BuiltinRunner, memory_dict::MemoryDict,
-        memory_segments::MemorySegmentManager, relocatable::RelocatableValue,
+        builtin_runner::BuiltinRunner,
+        memory_dict::MemoryDict,
+        memory_segments::MemorySegmentManager,
+        relocatable::{MaybeRelocatable, RelocatableValue},
     },
 };
 
@@ -30,6 +32,10 @@ pub struct CairoRunner {
     pub accessed_addresses: Option<HashSet<RelocatableValue>>,
     pub program_base: Option<RelocatableValue>,
     pub execution_base: Option<RelocatableValue>,
+    pub execution_public_memory: Option<Vec<BigInt>>,
+    pub initial_pc: Option<RelocatableValue>,
+    pub initial_ap: Option<RelocatableValue>,
+    pub initial_fp: Option<RelocatableValue>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +45,10 @@ pub enum Error {
         non_existing_builtins: Vec<String>,
         layout: String,
     },
+    #[error("Missing main().")]
+    MissingMain,
+    #[error("Segments not initialized.")]
+    SegmentsNotInitialized,
 }
 
 impl CairoRunner {
@@ -128,6 +138,10 @@ impl CairoRunner {
             accessed_addresses: None,
             program_base: None,
             execution_base: None,
+            execution_public_memory: None,
+            initial_pc: None,
+            initial_ap: None,
+            initial_fp: None,
         })
     }
 
@@ -145,6 +159,125 @@ impl CairoRunner {
         // for builtin_runner in self.builtin_runners.values():
         //     builtin_runner.initialize_segments(self)
         // ```
+    }
+
+    /// Initializes state for running a program from the main() entrypoint. If self.proof_mode ==
+    /// True, the execution starts from the start label rather then the main() function.
+    ///
+    /// Returns the value of the program counter after returning from main.
+    pub fn initialize_main_entrypoint(&mut self) -> Result<RelocatableValue, Error> {
+        self.execution_public_memory = Some(vec![]);
+
+        let stack: Vec<RelocatableValue> = vec![];
+        // TODO: implement the following Python code
+        //
+        // ```python
+        // for builtin_name in self.program.builtins:
+        //     builtin_runner = self.builtin_runners.get(f"{builtin_name}_builtin")
+        //     if builtin_runner is None:
+        //         assert self.allow_missing_builtins, "Missing builtin."
+        //         stack += [0]
+        //     else:
+        //         stack += builtin_runner.initial_stack()
+        // ```
+
+        if self.proof_mode {
+            // TODO: implement the following Python code
+            //
+            // ```python
+            // # Add the dummy last fp and pc to the public memory, so that the verifier can enforce
+            // # [fp - 2] = fp.
+            // stack = [self.execution_base + 2, 0] + stack
+            // self.execution_public_memory = list(range(len(stack)))
+            //
+            // assert isinstance(
+            //     self.program, Program
+            // ), "--proof_mode cannot be used with a StrippedProgram."
+            // self.initialize_state(self.program.start, stack)
+            // self.initial_fp = self.initial_ap = self.execution_base + 2
+            // return self.program_base + self.program.get_label("__end__")
+            // ```
+            todo!()
+        } else {
+            let return_fp = self.segments.add(None);
+
+            match self.program.main.clone() {
+                Some(main) => self.initialize_function_entrypoint(&main, stack, return_fp),
+                None => Err(Error::MissingMain),
+            }
+        }
+    }
+
+    pub fn initialize_function_entrypoint(
+        &mut self,
+        entrypoint: &BigInt,
+        args: Vec<RelocatableValue>,
+        return_fp: RelocatableValue,
+    ) -> Result<RelocatableValue, Error> {
+        let execution_base = self
+            .execution_base
+            .clone()
+            .ok_or(Error::SegmentsNotInitialized)?;
+
+        let end = self.segments.add(None);
+        let mut stack = args;
+        stack.push(return_fp);
+        stack.push(end.clone());
+
+        self.initialize_state(entrypoint, &stack)?;
+        self.initial_fp = Some(execution_base + &BigInt::from(stack.len()));
+        self.initial_ap = self.initial_fp.clone();
+        self.final_pc = Some(end.clone());
+
+        Ok(end)
+    }
+
+    pub fn initialize_state(
+        &mut self,
+        entrypoint: &BigInt,
+        stack: &[RelocatableValue],
+    ) -> Result<(), Error> {
+        let program_base = self
+            .program_base
+            .clone()
+            .ok_or(Error::SegmentsNotInitialized)?;
+        let execution_base = self
+            .execution_base
+            .clone()
+            .ok_or(Error::SegmentsNotInitialized)?;
+
+        self.initial_pc = Some(program_base.clone() + entrypoint);
+
+        // Load program.
+        self.load_data(
+            program_base,
+            &self
+                .program
+                .data
+                .iter()
+                .map(|item| item.to_owned().into())
+                .collect::<Vec<_>>(),
+        );
+
+        // Load stack.
+        self.load_data(
+            execution_base,
+            &stack
+                .iter()
+                .map(|item| item.to_owned().into())
+                .collect::<Vec<_>>(),
+        );
+
+        Ok(())
+    }
+
+    /// Writes data into the memory at address ptr and returns the first address after the data.
+    pub fn load_data(
+        &mut self,
+        ptr: RelocatableValue,
+        data: &[MaybeRelocatable],
+    ) -> RelocatableValue {
+        self.segments.load_data(ptr, data)
     }
 }
 
@@ -171,5 +304,8 @@ mod tests {
         .unwrap();
 
         runner.initialize_segments();
+        let end = runner.initialize_main_entrypoint().unwrap();
+
+        dbg!(end);
     }
 }

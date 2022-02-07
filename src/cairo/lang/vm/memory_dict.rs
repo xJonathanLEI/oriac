@@ -1,7 +1,7 @@
-use crate::cairo::lang::vm::relocatable::RelocatableValue;
-
 use num_bigint::BigInt;
 use std::collections::HashMap;
+
+use crate::cairo::lang::vm::relocatable::{MaybeRelocatable, RelocatableValue};
 
 /// Dictionary used for VM memory. Adds the following checks:
 /// * Checks that all memory addresses are valid.
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 /// * setitem: Checks that memory value is not changed.
 #[derive(Debug)]
 pub struct MemoryDict {
-    pub data: HashMap<RelocatableValue, RelocatableValue>,
+    pub data: HashMap<RelocatableValue, MaybeRelocatable>,
     pub frozen: bool,
     /// A dict of segment relocation rules mapping a segment index to a RelocatableValue. See
     /// add_relocation_rule for more details.
@@ -23,6 +23,10 @@ impl MemoryDict {
             frozen: false,
             relocation_rules: HashMap::new(),
         }
+    }
+
+    pub fn insert(&mut self, k: RelocatableValue, v: MaybeRelocatable) -> Option<MaybeRelocatable> {
+        self.data.insert(k, v)
     }
 }
 
