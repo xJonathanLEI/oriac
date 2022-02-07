@@ -1,25 +1,31 @@
 use crate::cairo::lang::{
-    compiler::program::ProgramBase,
+    compiler::program::Program,
     instances::CairoLayout,
     vm::{
         builtin_runner::BuiltinRunner,
         memory_dict::MemoryDict,
         memory_segments::MemorySegmentManager,
         relocatable::{MaybeRelocatable, RelocatableValue},
+        vm_core::{RunContext, VirtualMachine},
     },
 };
 
 use num_bigint::BigInt;
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 #[derive(Debug)]
 pub struct CairoRunner {
-    pub program: ProgramBase,
+    pub program: Rc<Program>,
     pub instance: CairoLayout,
-    pub builtin_runners: HashMap<String, BuiltinRunner>,
+    pub builtin_runners: Rc<HashMap<String, BuiltinRunner>>,
     pub original_steps: Option<BigInt>,
     pub proof_mode: bool,
     pub allow_missing_builtins: bool,
+    pub memory: Rc<RefCell<MemoryDict>>,
     pub segments: MemorySegmentManager,
     pub segment_offsets: Option<HashMap<BigInt, BigInt>>,
     pub final_pc: Option<RelocatableValue>,
@@ -36,6 +42,7 @@ pub struct CairoRunner {
     pub initial_pc: Option<RelocatableValue>,
     pub initial_ap: Option<RelocatableValue>,
     pub initial_fp: Option<RelocatableValue>,
+    pub vm: Option<VirtualMachine>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -49,11 +56,13 @@ pub enum Error {
     MissingMain,
     #[error("Segments not initialized.")]
     SegmentsNotInitialized,
+    #[error("State not initialized.")]
+    StateNotInitialized,
 }
 
 impl CairoRunner {
     pub fn new(
-        program: ProgramBase,
+        program: Rc<Program>,
         instance: CairoLayout,
         memory: MemoryDict,
         proof_mode: bool,
@@ -61,7 +70,7 @@ impl CairoRunner {
     ) -> Result<Self, Error> {
         if !allow_missing_builtins {
             let mut non_existing_builtins = vec![];
-            for program_builtin in program.builtins.iter() {
+            for program_builtin in program.builtins().iter() {
                 if !instance.builtins.contains_key(program_builtin) {
                     non_existing_builtins.push(program_builtin.to_owned());
                 }
@@ -121,15 +130,18 @@ impl CairoRunner {
         // assert is_subsequence(self.program.builtins, supported_builtin_list), err_msg
         // ```
 
-        let segments = MemorySegmentManager::new(memory, program.prime.clone());
+        let memory = Rc::new(RefCell::new(memory));
+
+        let segments = MemorySegmentManager::new(memory.clone(), program.prime().clone());
 
         Ok(Self {
             program,
             instance,
-            builtin_runners: HashMap::new(),
+            builtin_runners: Rc::new(HashMap::new()),
             original_steps: None,
             proof_mode,
             allow_missing_builtins,
+            memory,
             segments,
             segment_offsets: None,
             final_pc: None,
@@ -142,6 +154,7 @@ impl CairoRunner {
             initial_pc: None,
             initial_ap: None,
             initial_fp: None,
+            vm: None,
         })
     }
 
@@ -201,7 +214,7 @@ impl CairoRunner {
         } else {
             let return_fp = self.segments.add(None);
 
-            match self.program.main.clone() {
+            match self.program.main() {
                 Some(main) => self.initialize_function_entrypoint(&main, stack, return_fp),
                 None => Err(Error::MissingMain),
             }
@@ -253,7 +266,7 @@ impl CairoRunner {
             program_base,
             &self
                 .program
-                .data
+                .data()
                 .iter()
                 .map(|item| item.to_owned().into())
                 .collect::<Vec<_>>(),
@@ -267,6 +280,47 @@ impl CairoRunner {
                 .map(|item| item.to_owned().into())
                 .collect::<Vec<_>>(),
         );
+
+        Ok(())
+    }
+
+    pub fn initialize_vm(
+        &mut self,
+        hint_locals: HashMap<String, ()>,
+        static_locals: Option<HashMap<String, ()>>,
+    ) -> Result<(), Error> {
+        let initial_pc = self.initial_pc.clone().ok_or(Error::StateNotInitialized)?;
+        let initial_ap = self.initial_ap.clone().ok_or(Error::StateNotInitialized)?;
+        let initial_fp = self.initial_fp.clone().ok_or(Error::StateNotInitialized)?;
+
+        let context = RunContext::new(
+            self.memory.clone(),
+            initial_pc,
+            initial_ap,
+            initial_fp,
+            self.program.prime().clone(),
+        );
+
+        let static_locals = static_locals.unwrap_or_else(HashMap::new);
+
+        self.vm = Some(VirtualMachine::new(
+            self.program.clone(),
+            Rc::new(RefCell::new(context)),
+            hint_locals,
+            Some(static_locals),
+            Some(self.builtin_runners.clone()),
+            self.program_base.clone(),
+        ));
+
+        // TODO: implement the following Python code
+        //
+        // ```python
+        // for builtin_runner in self.builtin_runners.values():
+        //     builtin_runner.add_validation_rules(self)
+        //     builtin_runner.add_auto_deduction_rules(self)
+        //
+        // self.vm.validate_existing_memory()
+        // ```
 
         Ok(())
     }
@@ -285,17 +339,17 @@ impl CairoRunner {
 mod tests {
     use super::*;
 
-    use crate::cairo::lang::compiler::program::Program;
+    use crate::cairo::lang::compiler::program::FullProgram;
 
     #[test]
     fn run() {
-        let program = serde_json::from_str::<Program>(include_str!(
+        let program = serde_json::from_str::<FullProgram>(include_str!(
             "../../../../test-data/artifacts/run_past_end.json"
         ))
         .unwrap();
 
         let mut runner = CairoRunner::new(
-            program.into(),
+            Rc::new(program.into()),
             CairoLayout::plain_instance(),
             MemoryDict::new(),
             false,
@@ -304,8 +358,8 @@ mod tests {
         .unwrap();
 
         runner.initialize_segments();
-        let end = runner.initialize_main_entrypoint().unwrap();
+        let _end = runner.initialize_main_entrypoint().unwrap();
 
-        dbg!(end);
+        runner.initialize_vm(HashMap::new(), None).unwrap();
     }
 }

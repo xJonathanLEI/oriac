@@ -17,6 +17,13 @@ use serde::Deserialize;
 use serde_with::serde_as;
 use std::collections::HashMap;
 
+#[derive(Debug)]
+// Simulate inheritance
+pub enum Program {
+    Stripped(StrippedProgram),
+    Full(Box<FullProgram>),
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CairoHint {
     pub code: String,
@@ -24,16 +31,9 @@ pub struct CairoHint {
     pub flow_tracking_data: FlowTrackingDataActual,
 }
 
-#[derive(Debug)]
-pub struct ProgramBase {
-    pub prime: BigInt,
-    pub data: Vec<BigInt>,
-    pub builtins: Vec<String>,
-    pub main: Option<BigInt>,
-}
-
 /// Cairo program minimal information (stripped from hints, identifiers, etc.). The absence of hints
 /// is crucial for security reasons. Can be used for verifying execution.
+#[derive(Debug)]
 pub struct StrippedProgram {
     pub prime: BigInt,
     pub data: Vec<BigInt>,
@@ -43,7 +43,8 @@ pub struct StrippedProgram {
 
 #[serde_as]
 #[derive(Debug, Deserialize)]
-pub struct Program {
+/// Correspond to `Program` in `cairo-lang`.
+pub struct FullProgram {
     #[serde_as(as = "BigIntHex")]
     pub prime: BigInt,
     #[serde_as(as = "Vec<BigIntHex>")]
@@ -59,6 +60,48 @@ pub struct Program {
 }
 
 impl Program {
+    pub fn prime(&self) -> &BigInt {
+        match self {
+            Self::Stripped(program) => &program.prime,
+            Self::Full(program) => &program.prime,
+        }
+    }
+
+    pub fn data(&self) -> &[BigInt] {
+        match self {
+            Self::Stripped(program) => &program.data,
+            Self::Full(program) => &program.data,
+        }
+    }
+
+    pub fn builtins(&self) -> &[String] {
+        match self {
+            Self::Stripped(program) => &program.builtins,
+            Self::Full(program) => &program.builtins,
+        }
+    }
+
+    pub fn main(&self) -> Option<BigInt> {
+        match self {
+            Self::Stripped(program) => Some(program.main.clone()),
+            Self::Full(program) => program.main(),
+        }
+    }
+}
+
+impl From<StrippedProgram> for Program {
+    fn from(value: StrippedProgram) -> Self {
+        Program::Stripped(value)
+    }
+}
+
+impl From<FullProgram> for Program {
+    fn from(value: FullProgram) -> Self {
+        Program::Full(Box::new(value))
+    }
+}
+
+impl FullProgram {
     pub fn get_identifier(
         &self,
         name: ScopedName,
@@ -98,25 +141,13 @@ impl Program {
     }
 }
 
-impl From<Program> for ProgramBase {
-    fn from(value: Program) -> Self {
-        let main = value.main();
-        Self {
-            prime: value.prime,
-            data: value.data,
-            builtins: value.builtins,
-            main,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_program_deser() {
-        serde_json::from_str::<Program>(include_str!(
+        serde_json::from_str::<FullProgram>(include_str!(
             "../../../../test-data/artifacts/run_past_end.json"
         ))
         .unwrap();
@@ -124,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_program_main() {
-        let program = serde_json::from_str::<Program>(include_str!(
+        let program = serde_json::from_str::<FullProgram>(include_str!(
             "../../../../test-data/artifacts/run_past_end.json"
         ))
         .unwrap();

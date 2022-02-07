@@ -4,12 +4,12 @@ use crate::cairo::lang::vm::{
 };
 
 use num_bigint::BigInt;
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 /// Manages the list of memory segments, and allows relocating them once their sizes are known.
 #[derive(Debug)]
 pub struct MemorySegmentManager {
-    pub memory: MemoryDict,
+    pub memory: Rc<RefCell<MemoryDict>>,
     pub prime: BigInt,
     /// Number of segments.
     pub n_segments: BigInt,
@@ -24,7 +24,7 @@ pub struct MemorySegmentManager {
 }
 
 impl MemorySegmentManager {
-    pub fn new(memory: MemoryDict, prime: BigInt) -> Self {
+    pub fn new(memory: Rc<RefCell<MemoryDict>>, prime: BigInt) -> Self {
         Self {
             memory,
             prime,
@@ -75,6 +75,7 @@ impl MemorySegmentManager {
     ) -> RelocatableValue {
         for (i, v) in data.iter().enumerate() {
             self.memory
+                .borrow_mut()
                 .insert(ptr.clone() + &BigInt::from(i), v.to_owned());
         }
         ptr + &BigInt::from(data.len())

@@ -3,3 +3,6 @@ pub mod cairo_runner;
 pub mod memory_dict;
 pub mod memory_segments;
 pub mod relocatable;
+pub mod trace_entry;
+pub mod virtual_machine_base;
+pub mod vm_core;
