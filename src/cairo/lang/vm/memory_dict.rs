@@ -25,6 +25,10 @@ impl MemoryDict {
         }
     }
 
+    pub fn get(&self, k: &RelocatableValue) -> Option<&MaybeRelocatable> {
+        self.data.get(k)
+    }
+
     pub fn insert(&mut self, k: RelocatableValue, v: MaybeRelocatable) -> Option<MaybeRelocatable> {
         self.data.insert(k, v)
     }

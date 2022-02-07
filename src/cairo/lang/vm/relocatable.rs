@@ -42,3 +42,11 @@ impl std::ops::Add<&BigInt> for RelocatableValue {
         RelocatableValue::new(self.segment_index, self.offset + rhs)
     }
 }
+
+impl std::ops::Rem<&BigInt> for RelocatableValue {
+    type Output = RelocatableValue;
+
+    fn rem(self, rhs: &BigInt) -> Self::Output {
+        RelocatableValue::new(self.segment_index, self.offset % rhs)
+    }
+}

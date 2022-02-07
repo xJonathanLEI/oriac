@@ -6,7 +6,9 @@ use crate::cairo::lang::{
         memory_dict::MemoryDict,
         memory_segments::MemorySegmentManager,
         relocatable::{MaybeRelocatable, RelocatableValue},
+        utils::RunResources,
         vm_core::{RunContext, VirtualMachine},
+        vm_exceptions::VmException,
     },
 };
 
@@ -56,8 +58,14 @@ pub enum Error {
     MissingMain,
     #[error("Segments not initialized.")]
     SegmentsNotInitialized,
+    #[error("Function entrypoint not initialized.")]
+    FunctionEntrypointNotInitialized,
     #[error("State not initialized.")]
     StateNotInitialized,
+    #[error("VM not initialized.")]
+    VmNotInitialized,
+    #[error(transparent)]
+    VmError(VmException),
 }
 
 impl CairoRunner {
@@ -227,18 +235,13 @@ impl CairoRunner {
         args: Vec<RelocatableValue>,
         return_fp: RelocatableValue,
     ) -> Result<RelocatableValue, Error> {
-        let execution_base = self
-            .execution_base
-            .clone()
-            .ok_or(Error::SegmentsNotInitialized)?;
-
         let end = self.segments.add(None);
         let mut stack = args;
         stack.push(return_fp);
         stack.push(end.clone());
 
         self.initialize_state(entrypoint, &stack)?;
-        self.initial_fp = Some(execution_base + &BigInt::from(stack.len()));
+        self.initial_fp = Some(self.execution_base()?.to_owned() + &BigInt::from(stack.len()));
         self.initial_ap = self.initial_fp.clone();
         self.final_pc = Some(end.clone());
 
@@ -250,20 +253,11 @@ impl CairoRunner {
         entrypoint: &BigInt,
         stack: &[RelocatableValue],
     ) -> Result<(), Error> {
-        let program_base = self
-            .program_base
-            .clone()
-            .ok_or(Error::SegmentsNotInitialized)?;
-        let execution_base = self
-            .execution_base
-            .clone()
-            .ok_or(Error::SegmentsNotInitialized)?;
-
-        self.initial_pc = Some(program_base.clone() + entrypoint);
+        self.initial_pc = Some(self.program_base()?.to_owned() + entrypoint);
 
         // Load program.
         self.load_data(
-            program_base,
+            self.program_base()?.to_owned(),
             &self
                 .program
                 .data()
@@ -274,7 +268,7 @@ impl CairoRunner {
 
         // Load stack.
         self.load_data(
-            execution_base,
+            self.execution_base()?.to_owned(),
             &stack
                 .iter()
                 .map(|item| item.to_owned().into())
@@ -289,15 +283,11 @@ impl CairoRunner {
         hint_locals: HashMap<String, ()>,
         static_locals: Option<HashMap<String, ()>>,
     ) -> Result<(), Error> {
-        let initial_pc = self.initial_pc.clone().ok_or(Error::StateNotInitialized)?;
-        let initial_ap = self.initial_ap.clone().ok_or(Error::StateNotInitialized)?;
-        let initial_fp = self.initial_fp.clone().ok_or(Error::StateNotInitialized)?;
-
         let context = RunContext::new(
             self.memory.clone(),
-            initial_pc,
-            initial_ap,
-            initial_fp,
+            self.initial_pc()?.to_owned(),
+            self.initial_ap()?.to_owned(),
+            self.initial_fp()?.to_owned(),
             self.program.prime().clone(),
         );
 
@@ -325,6 +315,40 @@ impl CairoRunner {
         Ok(())
     }
 
+    /// Runs the VM until pc reaches 'addr', and stop right before that instruction is executed.
+    pub fn run_until_pc(
+        &mut self,
+        addr: RelocatableValue,
+        run_resources: Option<RunResources>,
+    ) -> Result<(), Error> {
+        let mut run_resources = run_resources.unwrap_or(RunResources { n_steps: None });
+
+        while self.vm()?.run_context.borrow().pc != addr && !run_resources.consumed() {
+            self.vm_step()?;
+            run_resources.consume_step();
+        }
+
+        if self.vm()?.run_context.borrow().pc != addr {
+            // TODO: implement `as_vm_exception` on `vm` and switch over
+            //       Error: End of program was not reached
+            Err(Error::VmError(VmException {}))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn vm_step(&mut self) -> Result<(), Error> {
+        if &self.vm()?.run_context.borrow().pc == self.final_pc()? {
+            // TODO: implement `as_vm_exception` on `vm` and switch over
+            //       Error: Execution reached the end of the program.
+            return Err(Error::VmError(VmException {}));
+        }
+
+        self.vm_mut()?.step();
+
+        Ok(())
+    }
+
     /// Writes data into the memory at address ptr and returns the first address after the data.
     pub fn load_data(
         &mut self,
@@ -332,6 +356,44 @@ impl CairoRunner {
         data: &[MaybeRelocatable],
     ) -> RelocatableValue {
         self.segments.load_data(ptr, data)
+    }
+
+    fn program_base(&self) -> Result<&RelocatableValue, Error> {
+        self.program_base
+            .as_ref()
+            .ok_or(Error::SegmentsNotInitialized)
+    }
+
+    fn execution_base(&self) -> Result<&RelocatableValue, Error> {
+        self.execution_base
+            .as_ref()
+            .ok_or(Error::SegmentsNotInitialized)
+    }
+
+    fn final_pc(&self) -> Result<&RelocatableValue, Error> {
+        self.final_pc
+            .as_ref()
+            .ok_or(Error::FunctionEntrypointNotInitialized)
+    }
+
+    fn initial_pc(&self) -> Result<&RelocatableValue, Error> {
+        self.initial_pc.as_ref().ok_or(Error::StateNotInitialized)
+    }
+
+    fn initial_ap(&self) -> Result<&RelocatableValue, Error> {
+        self.initial_ap.as_ref().ok_or(Error::StateNotInitialized)
+    }
+
+    fn initial_fp(&self) -> Result<&RelocatableValue, Error> {
+        self.initial_fp.as_ref().ok_or(Error::StateNotInitialized)
+    }
+
+    fn vm(&self) -> Result<&VirtualMachine, Error> {
+        self.vm.as_ref().ok_or(Error::VmNotInitialized)
+    }
+
+    fn vm_mut(&mut self) -> Result<&mut VirtualMachine, Error> {
+        self.vm.as_mut().ok_or(Error::VmNotInitialized)
     }
 }
 
