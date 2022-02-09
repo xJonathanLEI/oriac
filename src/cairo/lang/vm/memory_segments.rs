@@ -70,9 +70,9 @@ impl MemorySegmentManager {
     /// Writes data into the memory at address ptr and returns the first address after the data.
     pub fn load_data(
         &mut self,
-        ptr: RelocatableValue,
+        ptr: MaybeRelocatable,
         data: &[MaybeRelocatable],
-    ) -> RelocatableValue {
+    ) -> MaybeRelocatable {
         for (i, v) in data.iter().enumerate() {
             self.memory
                 .borrow_mut()

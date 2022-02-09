@@ -1,7 +1,7 @@
 use crate::cairo::lang::{
     compiler::{
         encode::decode_instruction,
-        instruction::Instruction,
+        instruction::{Instruction, Op1Addr, Register},
         program::{FullProgram, Program},
     },
     vm::{
@@ -9,6 +9,7 @@ use crate::cairo::lang::{
         memory_dict::MemoryDict,
         relocatable::{MaybeRelocatable, RelocatableValue},
         trace_entry::TraceEntry,
+        validated_memory_dict::ValidatedMemoryDict,
         virtual_machine_base::CompiledHint,
     },
 };
@@ -20,14 +21,31 @@ use std::{
     rc::Rc,
 };
 
+/// Values of the operands.
+#[derive(Debug)]
+pub struct Operands {
+    pub dst: MaybeRelocatable,
+    pub res: Option<MaybeRelocatable>,
+    pub op0: MaybeRelocatable,
+    pub op1: MaybeRelocatable,
+}
+
 /// Contains a complete state of the virtual machine. This includes registers and memory.
 #[derive(Debug, Clone)]
 pub struct RunContext {
     pub memory: Rc<RefCell<MemoryDict>>,
-    pub pc: RelocatableValue,
-    pub ap: RelocatableValue,
-    pub fp: RelocatableValue,
+    pub pc: MaybeRelocatable,
+    pub ap: MaybeRelocatable,
+    pub fp: MaybeRelocatable,
     pub prime: BigInt,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunContextError {
+    #[error("In immediate mode, off2 should be 1.")]
+    InvalidOff2Value,
+    #[error("op0 must be known in double dereference.")]
+    UnknownOp0,
 }
 
 #[derive(Debug)]
@@ -46,7 +64,7 @@ pub struct VirtualMachine {
     pub debug_file_contents: (),
     pub error_message_attributes: (),
     pub program: Rc<Program>,
-    pub validated_memory: (),
+    pub validated_memory: ValidatedMemoryDict,
     /// auto_deduction contains a mapping from a memory segment index to a list of functions (and a
     /// tuple of additional arguments) that may try to automatically deduce the value of memory
     /// cells in the segment (based on other memory cells).
@@ -60,7 +78,7 @@ pub struct VirtualMachine {
     pub run_context: Rc<RefCell<RunContext>>,
     /// A set to track the memory addresses accessed by actual Cairo instructions (as opposed to
     /// hints), necessary for accurate counting of memory holes.
-    pub accessed_addresses: HashSet<RelocatableValue>,
+    pub accessed_addresses: HashSet<MaybeRelocatable>,
     pub trace: Vec<TraceEntry>,
     /// Current step.
     pub current_step: BigInt,
@@ -69,9 +87,9 @@ pub struct VirtualMachine {
 impl RunContext {
     pub fn new(
         memory: Rc<RefCell<MemoryDict>>,
-        pc: RelocatableValue,
-        ap: RelocatableValue,
-        fp: RelocatableValue,
+        pc: MaybeRelocatable,
+        ap: MaybeRelocatable,
+        fp: MaybeRelocatable,
         prime: BigInt,
     ) -> Self {
         Self {
@@ -85,11 +103,12 @@ impl RunContext {
 
     /// Returns the encoded instruction (the value at pc) and the immediate value (the value at pc +
     /// 1, if it exists in the memory).
-    pub fn get_instruction_encoding(&self) -> (BigInt, Option<BigInt>) {
-        let memory = self.memory.borrow();
+    pub fn get_instruction_encoding(&mut self) -> (BigInt, Option<BigInt>) {
+        let mut memory = self.memory.as_ref().borrow_mut();
 
-        // TODO: check if it's safe to call unwrap here
-        let instruction_encoding = memory.get(&self.pc).unwrap();
+        // TODO: check if it's safe to call unwrap here (probably not, change to proper error
+        //       handling)
+        let instruction_encoding = memory.index(&self.pc).unwrap();
         let instruction_encoding = match instruction_encoding {
             MaybeRelocatable::Int(int) => int,
             // TODO: switch to proper error handling
@@ -97,7 +116,7 @@ impl RunContext {
         };
 
         let imm_addr = (self.pc.clone() + &BigInt::from(1)) % &self.prime;
-        let optional_imm = memory.get(&imm_addr);
+        let optional_imm = memory.get(&imm_addr, None);
         let optional_imm = match optional_imm {
             Some(imm) => match imm {
                 MaybeRelocatable::Int(int) => Some(int),
@@ -106,7 +125,47 @@ impl RunContext {
             None => None,
         };
 
-        (instruction_encoding.to_owned(), optional_imm.cloned())
+        (instruction_encoding, optional_imm)
+    }
+
+    pub fn compute_dst_addr(&self, instruction: &Instruction) -> MaybeRelocatable {
+        let base_addr = match instruction.dst_register {
+            Register::AP => self.ap.clone(),
+            Register::FP => self.fp.clone(),
+        };
+        (base_addr + &BigInt::from(instruction.off0)) % &self.prime
+    }
+
+    pub fn compute_op0_addr(&self, instruction: &Instruction) -> MaybeRelocatable {
+        let base_addr = match instruction.op0_register {
+            Register::AP => self.ap.clone(),
+            Register::FP => self.fp.clone(),
+        };
+        (base_addr + &BigInt::from(instruction.off1)) % &self.prime
+    }
+
+    pub fn compute_op1_addr(
+        &self,
+        instruction: &Instruction,
+        op0: Option<MaybeRelocatable>,
+    ) -> Result<MaybeRelocatable, RunContextError> {
+        let base_addr = match instruction.op1_addr {
+            Op1Addr::FP => self.fp.clone(),
+            Op1Addr::AP => self.ap.clone(),
+            Op1Addr::IMM => {
+                if instruction.off2 != 1 {
+                    return Err(RunContextError::InvalidOff2Value);
+                }
+                self.pc.clone()
+            }
+            Op1Addr::OP0 => match op0 {
+                Some(op0) => op0,
+                None => {
+                    return Err(RunContextError::UnknownOp0);
+                }
+            },
+        };
+        Ok((base_addr + &BigInt::from(instruction.off2)) % &self.prime)
     }
 }
 
@@ -130,7 +189,7 @@ impl VirtualMachine {
         hint_locals: HashMap<String, ()>,
         static_locals: Option<HashMap<String, ()>>,
         builtin_runners: Option<Rc<HashMap<String, BuiltinRunner>>>,
-        program_base: Option<RelocatableValue>,
+        program_base: Option<MaybeRelocatable>,
     ) -> Self {
         let program_base = program_base.unwrap_or_else(|| run_context.borrow().pc.clone());
         let builtin_runners = builtin_runners.unwrap_or_else(|| Rc::new(HashMap::new()));
@@ -146,6 +205,8 @@ impl VirtualMachine {
         // START: `VirtualMachineBase` ctor logic
         // //////////
 
+        let validated_memory = ValidatedMemoryDict::new(run_context.borrow().memory.clone());
+
         let mut vm = Self {
             prime: program.prime().clone(),
             builtin_runners,
@@ -156,7 +217,7 @@ impl VirtualMachine {
             debug_file_contents: (),
             error_message_attributes: (),
             program: program.clone(),
-            validated_memory: (),
+            validated_memory,
             auto_deduction: (),
             skip_instruction_execution: false,
             run_context,
@@ -262,7 +323,7 @@ impl VirtualMachine {
     }
 
     #[allow(unused)]
-    pub fn load_program(&mut self, program: &FullProgram, program_base: RelocatableValue) {
+    pub fn load_program(&mut self, program: &FullProgram, program_base: MaybeRelocatable) {
         // TODO: change to use `Result` for graceful error handling
         if self.prime != program.prime {
             panic!(
@@ -284,9 +345,40 @@ impl VirtualMachine {
         // ```
     }
 
+    /// Computes the values of the operands. Deduces dst if needed.
+    ///
+    /// Returns:
+    /// - operands - an Operands instance with the values of the operands.
+    /// - mem_addresses - the memory addresses for the 3 memory units used (dst, op0, op1).
+    #[allow(unused)]
+    pub fn compute_operands(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(Operands, Vec<BigInt>), RunContextError> {
+        // Try to fetch dst, op0, op1.
+        // op0 throughout this function represents the value at op0_addr.
+        // If op0 is set, this implies that we are going to set memory at op0_addr to that value.
+        // Same for op1, dst.
+        let dst_addr = self.run_context.borrow().compute_dst_addr(instruction);
+        let dst = self.validated_memory.get(&dst_addr, None);
+        let op0_addr = self.run_context.borrow().compute_op0_addr(instruction);
+        let op0 = self.validated_memory.get(&op0_addr, None);
+        let op1_addr = self
+            .run_context
+            .borrow()
+            .compute_op1_addr(instruction, op0)?;
+        let op1 = self.validated_memory.get(&op1_addr, None);
+
+        todo!()
+    }
+
     #[allow(clippy::let_and_return)] // Doing this on purpose to mimic Python code
     pub fn decode_current_instruction(&self) -> Instruction {
-        let (instruction_encoding, imm) = self.run_context.borrow().get_instruction_encoding();
+        let (instruction_encoding, imm) = self
+            .run_context
+            .as_ref()
+            .borrow_mut()
+            .get_instruction_encoding();
 
         let instruction = decode_instruction(instruction_encoding, imm);
 
@@ -294,7 +386,7 @@ impl VirtualMachine {
     }
 
     #[allow(unused)]
-    pub fn run_instruction(&self, instruction: &Instruction) {
+    pub fn run_instruction(&mut self, instruction: &Instruction) {
         todo!()
     }
 }

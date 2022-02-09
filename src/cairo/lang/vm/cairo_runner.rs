@@ -257,7 +257,7 @@ impl CairoRunner {
 
         // Load program.
         self.load_data(
-            self.program_base()?.to_owned(),
+            self.program_base()?.to_owned().into(),
             &self
                 .program
                 .data()
@@ -268,7 +268,7 @@ impl CairoRunner {
 
         // Load stack.
         self.load_data(
-            self.execution_base()?.to_owned(),
+            self.execution_base()?.to_owned().into(),
             &stack
                 .iter()
                 .map(|item| item.to_owned().into())
@@ -285,9 +285,9 @@ impl CairoRunner {
     ) -> Result<(), Error> {
         let context = RunContext::new(
             self.memory.clone(),
-            self.initial_pc()?.to_owned(),
-            self.initial_ap()?.to_owned(),
-            self.initial_fp()?.to_owned(),
+            self.initial_pc()?.to_owned().into(),
+            self.initial_ap()?.to_owned().into(),
+            self.initial_fp()?.to_owned().into(),
             self.program.prime().clone(),
         );
 
@@ -299,7 +299,7 @@ impl CairoRunner {
             hint_locals,
             Some(static_locals),
             Some(self.builtin_runners.clone()),
-            self.program_base.clone(),
+            Some(self.program_base()?.to_owned().into()),
         ));
 
         // TODO: implement the following Python code
@@ -318,7 +318,7 @@ impl CairoRunner {
     /// Runs the VM until pc reaches 'addr', and stop right before that instruction is executed.
     pub fn run_until_pc(
         &mut self,
-        addr: RelocatableValue,
+        addr: MaybeRelocatable,
         run_resources: Option<RunResources>,
     ) -> Result<(), Error> {
         let mut run_resources = run_resources.unwrap_or(RunResources { n_steps: None });
@@ -352,9 +352,9 @@ impl CairoRunner {
     /// Writes data into the memory at address ptr and returns the first address after the data.
     pub fn load_data(
         &mut self,
-        ptr: RelocatableValue,
+        ptr: MaybeRelocatable,
         data: &[MaybeRelocatable],
-    ) -> RelocatableValue {
+    ) -> MaybeRelocatable {
         self.segments.load_data(ptr, data)
     }
 

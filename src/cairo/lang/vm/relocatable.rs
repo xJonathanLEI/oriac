@@ -1,6 +1,8 @@
+use std::fmt::Display;
+
 use num_bigint::BigInt;
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum MaybeRelocatable {
     Int(BigInt),
     RelocatableValue(RelocatableValue),
@@ -26,6 +28,59 @@ impl From<RelocatableValue> for MaybeRelocatable {
     }
 }
 
+impl std::ops::Add<&BigInt> for MaybeRelocatable {
+    type Output = MaybeRelocatable;
+
+    fn add(self, rhs: &BigInt) -> Self::Output {
+        match self {
+            MaybeRelocatable::Int(int) => MaybeRelocatable::Int(int + rhs),
+            MaybeRelocatable::RelocatableValue(value) => {
+                MaybeRelocatable::RelocatableValue(value + rhs)
+            }
+        }
+    }
+}
+
+impl std::ops::Rem<&BigInt> for MaybeRelocatable {
+    type Output = MaybeRelocatable;
+
+    fn rem(self, rhs: &BigInt) -> Self::Output {
+        match self {
+            MaybeRelocatable::Int(int) => MaybeRelocatable::Int(int % rhs),
+            MaybeRelocatable::RelocatableValue(value) => {
+                MaybeRelocatable::RelocatableValue(value % rhs)
+            }
+        }
+    }
+}
+
+impl std::cmp::PartialEq<BigInt> for MaybeRelocatable {
+    fn eq(&self, other: &BigInt) -> bool {
+        match self {
+            MaybeRelocatable::Int(int) => int == other,
+            &MaybeRelocatable::RelocatableValue(_) => false,
+        }
+    }
+}
+
+impl std::cmp::PartialEq<RelocatableValue> for MaybeRelocatable {
+    fn eq(&self, other: &RelocatableValue) -> bool {
+        match self {
+            MaybeRelocatable::Int(_) => false,
+            MaybeRelocatable::RelocatableValue(value) => value == other,
+        }
+    }
+}
+
+impl Display for MaybeRelocatable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MaybeRelocatable::Int(value) => write!(f, "{}", value),
+            MaybeRelocatable::RelocatableValue(value) => write!(f, "{}", value),
+        }
+    }
+}
+
 impl RelocatableValue {
     pub fn new(segment_index: BigInt, offset: BigInt) -> Self {
         Self {
@@ -48,5 +103,11 @@ impl std::ops::Rem<&BigInt> for RelocatableValue {
 
     fn rem(self, rhs: &BigInt) -> Self::Output {
         RelocatableValue::new(self.segment_index, self.offset % rhs)
+    }
+}
+
+impl Display for RelocatableValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.segment_index, self.offset)
     }
 }
