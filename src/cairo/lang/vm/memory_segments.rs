@@ -76,7 +76,7 @@ impl MemorySegmentManager {
         for (i, v) in data.iter().enumerate() {
             self.memory
                 .borrow_mut()
-                .insert(ptr.clone() + &BigInt::from(i), v.to_owned());
+                .index_set(ptr.clone() + &BigInt::from(i), v.to_owned());
         }
         ptr + &BigInt::from(data.len())
     }

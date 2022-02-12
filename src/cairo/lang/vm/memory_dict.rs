@@ -65,8 +65,8 @@ impl MemoryDict {
         Ok(self.relocate_value(value))
     }
 
-    pub fn insert(&mut self, k: MaybeRelocatable, v: MaybeRelocatable) -> Option<MaybeRelocatable> {
-        self.data.insert(k, v)
+    pub fn index_set(&mut self, addr: MaybeRelocatable, value: MaybeRelocatable) {
+        self.data.insert(addr, value);
     }
 
     /// Relocates a value according to the relocation rules.

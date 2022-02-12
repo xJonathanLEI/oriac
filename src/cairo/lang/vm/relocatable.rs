@@ -28,6 +28,40 @@ impl From<RelocatableValue> for MaybeRelocatable {
     }
 }
 
+impl std::ops::Add<&MaybeRelocatable> for MaybeRelocatable {
+    type Output = MaybeRelocatable;
+
+    fn add(self, rhs: &MaybeRelocatable) -> Self::Output {
+        match self {
+            MaybeRelocatable::Int(lhs) => match rhs {
+                MaybeRelocatable::Int(rhs) => MaybeRelocatable::Int(lhs + rhs),
+                MaybeRelocatable::RelocatableValue(rhs) => {
+                    MaybeRelocatable::RelocatableValue(rhs.to_owned() + &lhs)
+                }
+            },
+            MaybeRelocatable::RelocatableValue(lhs) => match rhs {
+                MaybeRelocatable::Int(rhs) => MaybeRelocatable::RelocatableValue(lhs + rhs),
+                MaybeRelocatable::RelocatableValue(rhs) => {
+                    panic!("Cannot add two relocatable values: {lhs} + {rhs}.")
+                }
+            },
+        }
+    }
+}
+
+impl std::ops::Sub<&MaybeRelocatable> for MaybeRelocatable {
+    type Output = MaybeRelocatable;
+
+    fn sub(self, rhs: &MaybeRelocatable) -> Self::Output {
+        match self {
+            MaybeRelocatable::Int(_) => {
+                panic!("unsupported operand type(s) for -: 'int' and 'RelocatableValue'")
+            }
+            MaybeRelocatable::RelocatableValue(lhs) => lhs - rhs,
+        }
+    }
+}
+
 impl std::ops::Add<&BigInt> for MaybeRelocatable {
     type Output = MaybeRelocatable;
 
@@ -95,6 +129,29 @@ impl std::ops::Add<&BigInt> for RelocatableValue {
 
     fn add(self, rhs: &BigInt) -> Self::Output {
         RelocatableValue::new(self.segment_index, self.offset + rhs)
+    }
+}
+
+impl std::ops::Sub<&MaybeRelocatable> for RelocatableValue {
+    type Output = MaybeRelocatable;
+
+    fn sub(self, rhs: &MaybeRelocatable) -> Self::Output {
+        match rhs {
+            MaybeRelocatable::Int(rhs) => MaybeRelocatable::RelocatableValue(
+                RelocatableValue::new(self.segment_index, self.offset - rhs),
+            ),
+            MaybeRelocatable::RelocatableValue(rhs) => {
+                if self.segment_index != rhs.segment_index {
+                    // TODO: switch to proper error handling?
+                    panic!(
+                        "Can only subtract two relocatable values of the same segment ({} != {}).",
+                        self.segment_index, rhs.segment_index
+                    );
+                }
+
+                MaybeRelocatable::Int(self.offset - &rhs.offset)
+            }
+        }
     }
 }
 

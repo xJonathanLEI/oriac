@@ -1,25 +1,32 @@
 use crate::cairo::lang::{
     compiler::{
         encode::decode_instruction,
-        instruction::{Instruction, Op1Addr, Register},
+        instruction::{Instruction, Op1Addr, Opcode, Register, Res},
         program::{FullProgram, Program},
     },
     vm::{
         builtin_runner::BuiltinRunner,
-        memory_dict::MemoryDict,
+        memory_dict::{Error as MemoryDictError, MemoryDict},
         relocatable::{MaybeRelocatable, RelocatableValue},
         trace_entry::TraceEntry,
         validated_memory_dict::ValidatedMemoryDict,
         virtual_machine_base::CompiledHint,
+        vm_exceptions::PureValueError,
     },
 };
 
 use num_bigint::BigInt;
 use std::{
+    borrow::BorrowMut,
     cell::RefCell,
     collections::{HashMap, HashSet},
+    fmt::Debug,
     rc::Rc,
 };
+
+pub struct Rule {
+    pub inner: fn(&VirtualMachine, &RelocatableValue, &()) -> Option<BigInt>,
+}
 
 /// Values of the operands.
 #[derive(Debug)]
@@ -68,7 +75,7 @@ pub struct VirtualMachine {
     /// auto_deduction contains a mapping from a memory segment index to a list of functions (and a
     /// tuple of additional arguments) that may try to automatically deduce the value of memory
     /// cells in the segment (based on other memory cells).
-    pub auto_deduction: (),
+    pub auto_deduction: HashMap<BigInt, Vec<(Rule, ())>>,
     /// This flag can be set to true by hints to avoid the execution of the current step in step()
     /// (so that only the hint will be performed, but nothing else will happen).
     pub skip_instruction_execution: bool,
@@ -82,6 +89,22 @@ pub struct VirtualMachine {
     pub trace: Vec<TraceEntry>,
     /// Current step.
     pub current_step: BigInt,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum VirtualMachineError {
+    #[error(transparent)]
+    RunContextError(RunContextError),
+    #[error(transparent)]
+    MemoryDictError(MemoryDictError),
+    #[error(transparent)]
+    PureValueError(PureValueError),
+}
+
+impl Debug for Rule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "|Closure|")
+    }
 }
 
 impl RunContext {
@@ -218,7 +241,7 @@ impl VirtualMachine {
             error_message_attributes: (),
             program: program.clone(),
             validated_memory,
-            auto_deduction: (),
+            auto_deduction: HashMap::new(),
             skip_instruction_execution: false,
             run_context,
             accessed_addresses,
@@ -345,31 +368,235 @@ impl VirtualMachine {
         // ```
     }
 
+    /// Returns a tuple (deduced_op0, deduced_res).
+    /// Deduces the value of op0 if possible (based on dst and op1). Otherwise, returns None.
+    /// If res was already deduced, returns its deduced value as well.
+    #[allow(unused)]
+    pub fn deduce_op0(
+        &self,
+        instruction: &Instruction,
+        dst: Option<MaybeRelocatable>,
+        op1: Option<MaybeRelocatable>,
+    ) -> (Option<MaybeRelocatable>, Option<MaybeRelocatable>) {
+        match instruction.opcode {
+            Opcode::CALL => (
+                Some(self.run_context.borrow().pc.clone() + &BigInt::from(instruction.size())),
+                None,
+            ),
+            Opcode::ASSERT_EQ => {
+                if let (Res::ADD, Some(dst), Some(op1)) =
+                    (&instruction.res, dst.clone(), op1.clone())
+                {
+                    (Some((dst.clone() - &op1) % &self.prime), Some(dst))
+                } else if let (
+                    Res::MUL,
+                    Some(MaybeRelocatable::Int(dst)),
+                    Some(MaybeRelocatable::Int(op1)),
+                ) = (&instruction.res, dst, op1)
+                {
+                    if op1 != BigInt::from(0u32) {
+                        // TODO: implement the following Python code
+                        //
+                        // ```python
+                        // return div_mod(dst, op1, self.prime), dst
+                        // ```
+                        todo!()
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                }
+            }
+            _ => (None, None),
+        }
+    }
+
+    /// Returns a tuple (deduced_op1, deduced_res).
+    /// Deduces the value of op1 if possible (based on dst and op0). Otherwise, returns None.
+    /// If res was already deduced, returns its deduced value as well.
+    pub fn deduce_op1(
+        &self,
+        instruction: &Instruction,
+        dst: Option<MaybeRelocatable>,
+        op0: Option<MaybeRelocatable>,
+    ) -> (Option<MaybeRelocatable>, Option<MaybeRelocatable>) {
+        match instruction.opcode {
+            Opcode::ASSERT_EQ => {
+                if let (Res::OP1, Some(dst)) = (&instruction.res, dst.clone()) {
+                    (Some(dst.clone()), Some(dst))
+                } else if let (Res::ADD, Some(dst), Some(op0)) =
+                    (&instruction.res, dst.clone(), op0.clone())
+                {
+                    (Some((dst.clone() - &op0) % &self.prime), Some(dst))
+                } else if let (
+                    Res::MUL,
+                    Some(MaybeRelocatable::Int(_)),
+                    Some(MaybeRelocatable::Int(op0)),
+                ) = (&instruction.res, &dst, op0)
+                {
+                    if op0 != BigInt::from(0u32) {
+                        // TODO: implement the following Python code
+                        //
+                        // ```python
+                        // return div_mod(dst, op0, self.prime), dst
+                        // ```
+                        todo!()
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    todo!()
+                }
+            }
+            _ => (None, None),
+        }
+    }
+
+    /// Computes the value of res if possible.
+    #[allow(unused)]
+    pub fn compute_res(
+        &self,
+        instruction: &Instruction,
+        op0: MaybeRelocatable,
+        op1: MaybeRelocatable,
+    ) -> Result<Option<MaybeRelocatable>, VirtualMachineError> {
+        Ok(match instruction.res {
+            Res::OP1 => Some(op1),
+            Res::ADD => Some((op0 + &op1) % &self.prime),
+            Res::MUL => {
+                if let (MaybeRelocatable::Int(op0), MaybeRelocatable::Int(op1)) = (op0, op1) {
+                    Some(((op0 * op1) % &self.prime).into())
+                } else {
+                    return Err(VirtualMachineError::PureValueError(PureValueError {}));
+                }
+            }
+            Res::UNCONSTRAINED => {
+                // In this case res should be the inverse of dst.
+                // For efficiency, we do not compute it here.
+                None
+            }
+        })
+    }
+
     /// Computes the values of the operands. Deduces dst if needed.
     ///
     /// Returns:
     /// - operands - an Operands instance with the values of the operands.
     /// - mem_addresses - the memory addresses for the 3 memory units used (dst, op0, op1).
-    #[allow(unused)]
+    ///
+    /// NOTE: the type of `mem_addresses` elements has been changed from `int` in Python to
+    /// `MaybeRelocatable`, as it seems to be a mistake.
     pub fn compute_operands(
         &mut self,
         instruction: &Instruction,
-    ) -> Result<(Operands, Vec<BigInt>), RunContextError> {
+    ) -> Result<(Operands, Vec<MaybeRelocatable>), VirtualMachineError> {
         // Try to fetch dst, op0, op1.
         // op0 throughout this function represents the value at op0_addr.
         // If op0 is set, this implies that we are going to set memory at op0_addr to that value.
         // Same for op1, dst.
         let dst_addr = self.run_context.borrow().compute_dst_addr(instruction);
-        let dst = self.validated_memory.get(&dst_addr, None);
+        let mut dst = self.validated_memory.get(&dst_addr, None);
         let op0_addr = self.run_context.borrow().compute_op0_addr(instruction);
-        let op0 = self.validated_memory.get(&op0_addr, None);
+        let mut op0 = self.validated_memory.get(&op0_addr, None);
         let op1_addr = self
             .run_context
             .borrow()
-            .compute_op1_addr(instruction, op0)?;
-        let op1 = self.validated_memory.get(&op1_addr, None);
+            .compute_op1_addr(instruction, op0.clone())?;
+        let mut op1 = self.validated_memory.get(&op1_addr, None);
 
-        todo!()
+        // res throughout this function represents the computation on op0,op1
+        // as defined in decode.py.
+        // If it is set, this implies that compute_res(...) will return this value.
+        // If it is set without invoking compute_res(), this is an optimization, but should not
+        // yield a different result.
+        // In particular, res may be different than dst, even in ASSERT_EQ. In this case,
+        // The ASSERT_EQ validation will fail in opcode_assertions().
+        let mut res: Option<MaybeRelocatable> = None;
+
+        // Auto deduction rules.
+        // Note: This may fail to deduce if 2 auto deduction rules are needed to be used in
+        // a different order.
+        if matches!(op0, None) {
+            op0 = self.deduce_memory_cell(&op0_addr);
+        }
+        if matches!(op1, None) {
+            op1 = self.deduce_memory_cell(&op1_addr);
+        }
+
+        let should_update_dst = dst.is_none();
+        let should_update_op0 = op0.is_none();
+        let should_update_op1 = op1.is_none();
+
+        // Deduce op0 if needed.
+        if op0.is_none() {
+            let temp = self.deduce_op0(instruction, dst.clone(), op1.clone());
+            op0 = temp.0;
+            let deduced_res = temp.1;
+            if res.is_none() {
+                res = deduced_res;
+            }
+        }
+
+        // Deduce op1 if needed.
+        if op1.is_none() {
+            let temp = self.deduce_op1(instruction, dst.clone(), op0.clone());
+            op1 = temp.0;
+            let deduced_res = temp.1;
+            if res.is_none() {
+                res = deduced_res;
+            }
+        }
+
+        // Force pulling op0, op1 from memory for soundness test
+        // and to get an informative error message if they were not computed.
+        let op0 = match op0 {
+            Some(op0) => op0,
+            None => self.validated_memory.borrow_mut().index(&op0_addr)?,
+        };
+        let op1 = match op1 {
+            Some(op1) => op1,
+            None => self.validated_memory.borrow_mut().index(&op0_addr)?,
+        };
+
+        // Compute res if needed.
+        if res.is_none() {
+            res = self.compute_res(instruction, op0.clone(), op1.clone())?;
+        }
+
+        // Deduce dst.
+        if dst.is_none() {
+            if let (Opcode::ASSERT_EQ, Some(res)) = (&instruction.opcode, &res) {
+                dst = Some(res.to_owned());
+            } else if matches!(instruction.opcode, Opcode::CALL) {
+                dst = Some(self.run_context.borrow().pc.clone());
+            }
+        }
+
+        // Force pulling dst from memory for soundness.
+        let dst = match dst {
+            Some(dst) => dst,
+            None => self.validated_memory.borrow_mut().index(&dst_addr)?,
+        };
+
+        // Write updated values.
+        if should_update_dst {
+            self.validated_memory
+                .index_set(dst_addr.clone(), dst.clone());
+        }
+        if should_update_op0 {
+            self.validated_memory
+                .index_set(op0_addr.clone(), op0.clone());
+        }
+        if should_update_op1 {
+            self.validated_memory
+                .index_set(op1_addr.clone(), op1.clone());
+        }
+
+        Ok((
+            Operands { dst, op0, op1, res },
+            vec![dst_addr, op0_addr, op1_addr],
+        ))
     }
 
     #[allow(clippy::let_and_return)] // Doing this on purpose to mimic Python code
@@ -388,5 +615,42 @@ impl VirtualMachine {
     #[allow(unused)]
     pub fn run_instruction(&mut self, instruction: &Instruction) {
         todo!()
+    }
+
+    /// Tries to deduce the value of memory\[addr\] if it was not already computed.
+    ///
+    /// Returns the value if deduced, otherwise returns None.
+    pub fn deduce_memory_cell(&mut self, addr: &MaybeRelocatable) -> Option<MaybeRelocatable> {
+        match addr {
+            MaybeRelocatable::Int(_) => None,
+            MaybeRelocatable::RelocatableValue(addr) => {
+                match self.auto_deduction.get(&addr.segment_index) {
+                    Some(rules) => {
+                        for (rule, args) in rules.iter() {
+                            match (rule.inner)(self, addr, args) {
+                                Some(value) => self
+                                    .validated_memory
+                                    .index_set(addr.to_owned().into(), value.into()),
+                                None => continue,
+                            }
+                        }
+                        None
+                    }
+                    None => None,
+                }
+            }
+        }
+    }
+}
+
+impl From<RunContextError> for VirtualMachineError {
+    fn from(value: RunContextError) -> Self {
+        VirtualMachineError::RunContextError(value)
+    }
+}
+
+impl From<MemoryDictError> for VirtualMachineError {
+    fn from(value: MemoryDictError) -> Self {
+        VirtualMachineError::MemoryDictError(value)
     }
 }
