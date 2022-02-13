@@ -7,7 +7,7 @@ use crate::cairo::lang::{
         memory_segments::MemorySegmentManager,
         relocatable::{MaybeRelocatable, RelocatableValue},
         utils::RunResources,
-        vm_core::{RunContext, VirtualMachine},
+        vm_core::{RunContext, VirtualMachine, VirtualMachineError},
         vm_exceptions::VmException,
     },
 };
@@ -66,6 +66,8 @@ pub enum Error {
     VmNotInitialized,
     #[error(transparent)]
     VmError(VmException),
+    #[error(transparent)]
+    VirtualMachineError(VirtualMachineError),
 }
 
 impl CairoRunner {
@@ -344,7 +346,7 @@ impl CairoRunner {
             return Err(Error::VmError(VmException {}));
         }
 
-        self.vm_mut()?.step();
+        self.vm_mut()?.step()?;
 
         Ok(())
     }
@@ -397,6 +399,12 @@ impl CairoRunner {
     }
 }
 
+impl From<VirtualMachineError> for Error {
+    fn from(value: VirtualMachineError) -> Self {
+        Self::VirtualMachineError(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,8 +428,10 @@ mod tests {
         .unwrap();
 
         runner.initialize_segments();
-        let _end = runner.initialize_main_entrypoint().unwrap();
+        let end = runner.initialize_main_entrypoint().unwrap();
 
         runner.initialize_vm(HashMap::new(), None).unwrap();
+
+        runner.run_until_pc(end.into(), None).unwrap();
     }
 }

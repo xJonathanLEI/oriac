@@ -1,7 +1,7 @@
 use crate::cairo::lang::{
     compiler::{
         encode::decode_instruction,
-        instruction::{Instruction, Op1Addr, Opcode, Register, Res},
+        instruction::{ApUpdate, FpUpdate, Instruction, Op1Addr, Opcode, PcUpdate, Register, Res},
         program::{FullProgram, Program},
     },
     vm::{
@@ -86,7 +86,7 @@ pub struct VirtualMachine {
     /// A set to track the memory addresses accessed by actual Cairo instructions (as opposed to
     /// hints), necessary for accurate counting of memory holes.
     pub accessed_addresses: HashSet<MaybeRelocatable>,
-    pub trace: Vec<TraceEntry>,
+    pub trace: Vec<TraceEntry<MaybeRelocatable>>,
     /// Current step.
     pub current_step: BigInt,
 }
@@ -99,6 +99,29 @@ pub enum VirtualMachineError {
     MemoryDictError(MemoryDictError),
     #[error(transparent)]
     PureValueError(PureValueError),
+    #[error("Res.UNCONSTRAINED cannot be used with Opcode.ASSERT_EQ")]
+    AssertEqWithUnconstrained,
+    #[error("An ASSERT_EQ instruction failed: {dst} != {res}.")]
+    AssertEqFailed {
+        dst: MaybeRelocatable,
+        res: MaybeRelocatable,
+    },
+    #[error("Call failed to write return-pc (inconsistent op0): {op0} != {return_pc}. Did you forget to increment ap?")]
+    InconsistentOp0 {
+        op0: MaybeRelocatable,
+        return_pc: MaybeRelocatable,
+    },
+    #[error("Call failed to write return-fp (inconsistent dst): {dst} != {return_fp}. Did you forget to increment ap?")]
+    InconsistentDst {
+        dst: MaybeRelocatable,
+        return_fp: MaybeRelocatable,
+    },
+    #[error("Res.UNCONSTRAINED cannot be used with ApUpdate.ADD")]
+    AddWithUnconstrained,
+    #[error("Res.UNCONSTRAINED cannot be used with PcUpdate.JUMP")]
+    JumpWithUnconstrained,
+    #[error("Res.UNCONSTRAINED cannot be used with PcUpdate.JUMP_REL")]
+    JumpRelWithUnconstrained,
 }
 
 impl Debug for Rule {
@@ -305,7 +328,7 @@ impl VirtualMachine {
         self.exec_scopes.push(new_scope);
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&mut self) -> Result<(), VirtualMachineError> {
         self.skip_instruction_execution = false;
 
         // Hints not yet implemented
@@ -342,7 +365,7 @@ impl VirtualMachine {
         let instruction = self.decode_current_instruction();
 
         // Run.
-        self.run_instruction(&instruction);
+        self.run_instruction(&instruction)
     }
 
     #[allow(unused)]
@@ -366,6 +389,74 @@ impl VirtualMachine {
         //     if attr.name == ERROR_MESSAGE_ATTRIBUTE
         // )
         // ```
+    }
+
+    pub fn update_registers(
+        &mut self,
+        instruction: &Instruction,
+        operands: &Operands,
+    ) -> Result<(), VirtualMachineError> {
+        // Update fp.
+        let new_fp_value = match instruction.fp_update {
+            FpUpdate::AP_PLUS2 => Some(self.run_context.borrow().ap.clone() + &BigInt::from(2u32)),
+            FpUpdate::DST => Some(operands.dst.clone()),
+            FpUpdate::REGULAR => None,
+        };
+        if let Some(new_fp_value) = new_fp_value {
+            self.run_context.as_ref().borrow_mut().fp = new_fp_value;
+        }
+
+        // Update ap.
+        let new_ap_value = match instruction.ap_update {
+            ApUpdate::ADD => match &operands.res {
+                Some(res) => Some(res.to_owned() % &self.prime),
+                None => return Err(VirtualMachineError::AddWithUnconstrained),
+            },
+            ApUpdate::ADD1 => Some(self.run_context.borrow().ap.clone() + &BigInt::from(1)),
+            ApUpdate::ADD2 => Some(self.run_context.borrow().ap.clone() + &BigInt::from(2)),
+            ApUpdate::REGULAR => None,
+        };
+        let new_ap_value = match new_ap_value {
+            Some(new_ap_value) => new_ap_value % &self.prime,
+            None => self.run_context.borrow().ap.clone() % &self.prime,
+        };
+        self.run_context.as_ref().borrow_mut().ap = new_ap_value;
+
+        // Update pc.
+        // The pc update should be done last so that we will have the correct pc in case of an
+        // exception during one of the updates above.
+        let new_pc_value = match instruction.pc_update {
+            PcUpdate::REGULAR => {
+                Some(self.run_context.borrow().pc.clone() + &BigInt::from(instruction.size()))
+            }
+            PcUpdate::JUMP => match &operands.res {
+                Some(res) => Some(res.to_owned()),
+                None => return Err(VirtualMachineError::JumpWithUnconstrained),
+            },
+            PcUpdate::JUMP_REL => match &operands.res {
+                Some(res) => match res {
+                    MaybeRelocatable::Int(res) => Some(self.run_context.borrow().pc.clone() + res),
+                    &MaybeRelocatable::RelocatableValue(_) => {
+                        return Err(VirtualMachineError::PureValueError(PureValueError {}))
+                    }
+                },
+                None => return Err(VirtualMachineError::JumpRelWithUnconstrained),
+            },
+            PcUpdate::JNZ => {
+                if is_zero(&operands.dst)? {
+                    Some(self.run_context.borrow().pc.clone() + &BigInt::from(instruction.size()))
+                } else {
+                    Some(self.run_context.borrow().pc.clone() + &operands.op1)
+                }
+            }
+        };
+        let new_pc_value = match new_pc_value {
+            Some(new_pc_value) => new_pc_value % &self.prime,
+            None => self.run_context.borrow().pc.clone() % &self.prime,
+        };
+        self.run_context.as_ref().borrow_mut().pc = new_pc_value;
+
+        Ok(())
     }
 
     /// Returns a tuple (deduced_op0, deduced_res).
@@ -454,7 +545,6 @@ impl VirtualMachine {
     }
 
     /// Computes the value of res if possible.
-    #[allow(unused)]
     pub fn compute_res(
         &self,
         instruction: &Instruction,
@@ -613,8 +703,50 @@ impl VirtualMachine {
     }
 
     #[allow(unused)]
-    pub fn run_instruction(&mut self, instruction: &Instruction) {
-        todo!()
+    pub fn opcode_assertions(
+        &self,
+        instruction: &Instruction,
+        operands: &Operands,
+    ) -> Result<(), VirtualMachineError> {
+        match instruction.opcode {
+            Opcode::ASSERT_EQ => todo!(),
+            Opcode::CALL => todo!(),
+            Opcode::RET => Ok(()),
+            Opcode::NOP => Ok(()),
+        }
+    }
+
+    pub fn run_instruction(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VirtualMachineError> {
+        // TODO: use `as_vm_exception` as `cairo-lang` does
+
+        // Compute operands.
+        let (operands, operands_mem_addresses) = self.compute_operands(instruction)?;
+
+        // Opcode assertions.
+        self.opcode_assertions(instruction, &operands)?;
+
+        // Write to trace.
+        self.trace.push(TraceEntry {
+            pc: self.run_context.borrow().pc.clone(),
+            ap: self.run_context.borrow().ap.clone(),
+            fp: self.run_context.borrow().fp.clone(),
+        });
+
+        for addr in operands_mem_addresses.into_iter() {
+            self.accessed_addresses.insert(addr);
+        }
+        self.accessed_addresses
+            .insert(self.run_context.borrow().pc.clone());
+
+        // Update registers.
+        self.update_registers(instruction, &operands)?;
+
+        self.current_step += 1;
+
+        Ok(())
     }
 
     /// Tries to deduce the value of memory\[addr\] if it was not already computed.
@@ -652,5 +784,26 @@ impl From<RunContextError> for VirtualMachineError {
 impl From<MemoryDictError> for VirtualMachineError {
     fn from(value: MemoryDictError) -> Self {
         VirtualMachineError::MemoryDictError(value)
+    }
+}
+
+impl From<PureValueError> for VirtualMachineError {
+    fn from(value: PureValueError) -> Self {
+        VirtualMachineError::PureValueError(value)
+    }
+}
+
+/// Returns True if value is zero (used for jnz instructions).
+/// This function can be overridden by subclasses.
+fn is_zero(value: &MaybeRelocatable) -> Result<bool, PureValueError> {
+    match value {
+        MaybeRelocatable::Int(value) => Ok(value == &BigInt::from(0u32)),
+        MaybeRelocatable::RelocatableValue(value) => {
+            if value.offset >= BigInt::from(0u32) {
+                Ok(false)
+            } else {
+                Err(PureValueError {})
+            }
+        }
     }
 }
