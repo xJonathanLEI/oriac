@@ -122,6 +122,14 @@ pub enum VirtualMachineError {
     JumpWithUnconstrained,
     #[error("Res.UNCONSTRAINED cannot be used with PcUpdate.JUMP_REL")]
     JumpRelWithUnconstrained,
+    #[error("Every enter_scope() requires a corresponding exit_scope().")]
+    EnterExitScopeMismatch,
+    #[error("Inconsistent auto deduction rule at address {addr}. {current_value} != {new_value}.")]
+    InconsistentAutoDeduction {
+        addr: RelocatableValue,
+        current_value: MaybeRelocatable,
+        new_value: MaybeRelocatable,
+    },
 }
 
 impl Debug for Rule {
@@ -773,6 +781,64 @@ impl VirtualMachine {
             }
         }
     }
+
+    /// Makes sure that all assigned memory cells are consistent with their auto deduction rules.
+    #[allow(clippy::needless_collect)] // Need some refactoring to work around the issue
+    pub fn verify_auto_deductions(&mut self) -> Result<(), VirtualMachineError> {
+        let addrs = self
+            .validated_memory
+            .memory
+            .as_ref()
+            .borrow()
+            .data
+            .iter()
+            .map(|(addr, _)| addr.to_owned())
+            .collect::<Vec<_>>();
+
+        for addr in addrs.into_iter() {
+            match addr {
+                MaybeRelocatable::Int(_) => continue,
+                MaybeRelocatable::RelocatableValue(addr) => {
+                    if let Some(rules) = self.auto_deduction.get(&addr.segment_index) {
+                        for (rule, args) in rules.iter() {
+                            match (rule.inner)(self, &addr, args) {
+                                Some(value) => {
+                                    let current =
+                                        self.validated_memory.index(&addr.clone().into())?;
+
+                                    // If the values are not the same, try using check_eq to
+                                    // allow a subclass to override this result.
+                                    if current != value
+                                        && !check_eq(&current, &value.clone().into())
+                                    {
+                                        return Err(
+                                            VirtualMachineError::InconsistentAutoDeduction {
+                                                addr: addr.to_owned(),
+                                                current_value: current,
+                                                new_value: value.into(),
+                                            },
+                                        );
+                                    }
+                                }
+                                None => continue,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn end_run(&mut self) -> Result<(), VirtualMachineError> {
+        self.verify_auto_deductions()?;
+        if self.exec_scopes.len() != 1 {
+            return Err(VirtualMachineError::EnterExitScopeMismatch);
+        }
+
+        Ok(())
+    }
 }
 
 impl From<RunContextError> for VirtualMachineError {
@@ -806,4 +872,10 @@ fn is_zero(value: &MaybeRelocatable) -> Result<bool, PureValueError> {
             }
         }
     }
+}
+
+/// Called when an instruction encounters an assertion that two values should be equal.
+/// This function can be overridden by subclasses.
+fn check_eq(val0: &MaybeRelocatable, val1: &MaybeRelocatable) -> bool {
+    val0 == val1
 }

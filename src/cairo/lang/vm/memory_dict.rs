@@ -22,6 +22,8 @@ pub enum Error {
     NegativeValue { name: &'static str, num: BigInt },
     #[error("Unknown value for memory cell at address {addr}.")]
     UnknownMemory { addr: MaybeRelocatable },
+    #[error("Memory is frozen and cannot be changed.")]
+    MemoryFrozen,
 }
 
 impl MemoryDict {
@@ -69,6 +71,15 @@ impl MemoryDict {
         self.data.insert(addr, value);
     }
 
+    /// Freezes the memory - no changes can be made from now on.
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+
     /// Relocates a value according to the relocation rules.
     ///
     /// The original value is returned if the relocation rules do not apply to value.
@@ -87,6 +98,34 @@ impl MemoryDict {
                 }
             }
         }
+    }
+
+    /// Relocates the memory according to the relocation rules and clears self.relocation_rules.
+    #[allow(clippy::needless_collect)] // Need some refactoring to work around the issue
+    pub fn relocate_memory(&mut self) -> Result<(), Error> {
+        if self.frozen {
+            return Err(Error::MemoryFrozen);
+        }
+
+        if self.relocation_rules.is_empty() {
+            return Ok(());
+        }
+
+        self.data = {
+            let items = self
+                .data
+                .iter()
+                .map(|(addr, value)| (addr.to_owned(), value.to_owned()))
+                .collect::<Vec<_>>();
+
+            items
+                .into_iter()
+                .map(|(addr, value)| (self.relocate_value(addr), self.relocate_value(value)))
+                .collect::<HashMap<_, _>>()
+        };
+        self.relocation_rules.clear();
+
+        Ok(())
     }
 
     /// Checks that num is a valid Cairo value: positive int or relocatable. Currently, does not

@@ -3,8 +3,8 @@ use crate::cairo::lang::{
     instances::CairoLayout,
     vm::{
         builtin_runner::BuiltinRunner,
-        memory_dict::MemoryDict,
-        memory_segments::MemorySegmentManager,
+        memory_dict::{Error as MemoryDictError, MemoryDict},
+        memory_segments::{Error as MemorySegmentError, MemorySegmentManager},
         relocatable::{MaybeRelocatable, RelocatableValue},
         utils::RunResources,
         vm_core::{RunContext, VirtualMachine, VirtualMachineError},
@@ -65,9 +65,15 @@ pub enum Error {
     #[error("VM not initialized.")]
     VmNotInitialized,
     #[error(transparent)]
+    MemoryDictError(MemoryDictError),
+    #[error(transparent)]
+    MemorySegmentError(MemorySegmentError),
+    #[error(transparent)]
     VmError(VmException),
     #[error(transparent)]
     VirtualMachineError(VirtualMachineError),
+    #[error("end_run called twice")]
+    EndRunCalledTwice,
 }
 
 impl CairoRunner {
@@ -351,6 +357,61 @@ impl CairoRunner {
         Ok(())
     }
 
+    pub fn end_run(
+        &mut self,
+        disable_trace_padding: bool,
+        disable_finalize_all: bool,
+    ) -> Result<(), Error> {
+        if self.run_ended {
+            return Err(Error::EndRunCalledTwice);
+        }
+
+        self.accessed_addresses = {
+            let mut vm_memory = self.memory.borrow_mut();
+            Some(
+                self.vm()?
+                    .accessed_addresses
+                    .iter()
+                    .map(|addr| match vm_memory.relocate_value(addr.to_owned()) {
+                        MaybeRelocatable::Int(_) => {
+                            panic!("unexpected variant: MaybeRelocatable::Int")
+                        }
+                        MaybeRelocatable::RelocatableValue(value) => value,
+                    })
+                    .collect::<HashSet<_>>(),
+            )
+        };
+        self.memory.borrow_mut().relocate_memory()?;
+        self.vm_mut()?.end_run()?;
+
+        if disable_finalize_all {
+            // For tests.
+            return Ok(());
+        }
+
+        // Freeze to enable caching; No changes in memory should be made from now on.
+        self.memory.borrow_mut().freeze();
+        // Deduce the size of each segment from its usage.
+        self.segments.compute_effective_sizes(false)?;
+
+        if self.proof_mode && !disable_trace_padding {
+            // TODO: implement the following Python code
+            //
+            // ```python
+            // self.run_until_next_power_of_2()
+            // while not self.check_used_cells():
+            //     self.run_for_steps(1)
+            //     self.run_until_next_power_of_2()
+            // ```
+
+            todo!()
+        }
+
+        self.run_ended = true;
+
+        Ok(())
+    }
+
     /// Writes data into the memory at address ptr and returns the first address after the data.
     pub fn load_data(
         &mut self,
@@ -399,6 +460,18 @@ impl CairoRunner {
     }
 }
 
+impl From<MemoryDictError> for Error {
+    fn from(value: MemoryDictError) -> Self {
+        Self::MemoryDictError(value)
+    }
+}
+
+impl From<MemorySegmentError> for Error {
+    fn from(value: MemorySegmentError) -> Self {
+        Self::MemorySegmentError(value)
+    }
+}
+
 impl From<VirtualMachineError> for Error {
     fn from(value: VirtualMachineError) -> Self {
         Self::VirtualMachineError(value)
@@ -433,5 +506,7 @@ mod tests {
         runner.initialize_vm(HashMap::new(), None).unwrap();
 
         runner.run_until_pc(end.into(), None).unwrap();
+
+        runner.end_run(false, false).unwrap();
     }
 }
