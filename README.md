@@ -6,6 +6,12 @@
 
 > _This is a **toy** implementation of the Cairo VM I'm building for learning purposes. There's no guarantee on when or if it will reach functional parity with the real thing. You should NOT use this in production._
 
+## CLI Tools
+
+This project contains the following command line tools:
+
+- `oriac-run`: (_very_ early WIP) a drop-in replacement for `cairo-run`
+
 ## License
 
 Licensed under either of
