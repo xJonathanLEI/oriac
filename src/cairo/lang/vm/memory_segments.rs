@@ -1,6 +1,7 @@
 use crate::cairo::lang::vm::{
     memory_dict::MemoryDict,
     relocatable::{MaybeRelocatable, RelocatableValue},
+    vm_exceptions::SecurityError,
 };
 
 use num_bigint::BigInt;
@@ -27,6 +28,8 @@ pub struct MemorySegmentManager {
 pub enum Error {
     #[error("Memory has to be frozen before calculating effective size.")]
     MemoryNotFrozen,
+    #[error(transparent)]
+    SecurityError(SecurityError),
 }
 
 impl MemorySegmentManager {
@@ -101,10 +104,7 @@ impl MemorySegmentManager {
 
             for (addr, _) in self.memory.borrow().data.iter() {
                 match addr {
-                    // TODO: check if memory addresses are ALWAYS `Relocatable`
-                    MaybeRelocatable::Int(_) => {
-                        panic!("Expected memory address to be relocatable value. Found: int")
-                    }
+                    MaybeRelocatable::Int(_) => return Err(Error::SecurityError(SecurityError {})),
                     MaybeRelocatable::RelocatableValue(addr) => {
                         // TODO: check if unwrap() is safe here
                         let previous_max_size = segment_used_sizes
