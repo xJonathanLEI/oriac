@@ -216,7 +216,8 @@ impl CairoRunner {
             // ```python
             // # Add the dummy last fp and pc to the public memory, so that the verifier can enforce
             // # [fp - 2] = fp.
-            // stack = [self.execution_base + 2, 0] + stack
+            // stack_prefix: List[MaybeRelocatable] = [self.execution_base + 2, 0]
+            // stack = stack_prefix + stack
             // self.execution_public_memory = list(range(len(stack)))
             //
             // assert isinstance(
