@@ -299,7 +299,7 @@ impl CairoRunner {
             self.program.prime().clone(),
         );
 
-        let static_locals = static_locals.unwrap_or_else(HashMap::new);
+        let static_locals = static_locals.unwrap_or_default();
 
         self.vm = Some(VirtualMachine::new(
             self.program.clone(),
