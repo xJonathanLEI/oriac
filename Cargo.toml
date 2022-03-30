@@ -29,3 +29,6 @@ harness = false
 name = "oriac-run"
 path = "src/cli/run/main.rs"
 doc = false
+
+[lib]
+crate-type = ["cdylib"]
