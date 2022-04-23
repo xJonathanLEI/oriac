@@ -1,3 +1,5 @@
+#![allow(clippy::unit_arg)]
+
 use std::{collections::HashMap, rc::Rc};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};

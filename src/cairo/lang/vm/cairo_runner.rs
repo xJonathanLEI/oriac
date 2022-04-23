@@ -2,9 +2,10 @@ use crate::cairo::lang::{
     compiler::program::Program,
     instances::CairoLayout,
     vm::{
-        builtin_runner::BuiltinRunner,
+        builtin_runner::{BuiltinRunner, Error as BuiltinRunnerError},
         memory_dict::{Error as MemoryDictError, MemoryDict},
         memory_segments::{Error as MemorySegmentError, MemorySegmentManager},
+        output_builtin_runner::OutputBuiltinRunner,
         relocatable::{MaybeRelocatable, RelocatableValue},
         utils::RunResources,
         vm_core::{RunContext, VirtualMachine, VirtualMachineError},
@@ -19,11 +20,15 @@ use std::{
     rc::Rc,
 };
 
+pub type BuiltinRunnerMap = HashMap<String, Box<dyn BuiltinRunner>>;
+
+type BuiltinRunnerFactory = dyn Fn(&str, bool) -> Box<dyn BuiltinRunner>;
+
 #[derive(Debug)]
 pub struct CairoRunner {
     pub program: Rc<Program>,
     pub instance: CairoLayout,
-    pub builtin_runners: Rc<HashMap<String, BuiltinRunner>>,
+    pub builtin_runners: Rc<RefCell<BuiltinRunnerMap>>,
     pub original_steps: Option<BigInt>,
     pub proof_mode: bool,
     pub allow_missing_builtins: bool,
@@ -54,6 +59,15 @@ pub enum Error {
         non_existing_builtins: Vec<String>,
         layout: String,
     },
+    #[error("The {name} builtin is not supported.")]
+    BuiltinNotSupported { name: String },
+    #[error("The builtins specified by the %builtins directive must be subsequence of {supported_builtin_list:?}. Got {program_builtins:?}.")]
+    BuiltinsNotSubsequence {
+        supported_builtin_list: Vec<String>,
+        program_builtins: Vec<String>,
+    },
+    #[error("Missing builtin.")]
+    MissingBuiltin,
     #[error("Missing main().")]
     MissingMain,
     #[error("Segments not initialized.")]
@@ -72,8 +86,16 @@ pub enum Error {
     VmError(VmException),
     #[error(transparent)]
     VirtualMachineError(VirtualMachineError),
+    #[error(transparent)]
+    BuiltinRunnerError(BuiltinRunnerError),
     #[error("end_run called twice")]
     EndRunCalledTwice,
+    #[error("Run must be ended before calling read_return_values.")]
+    RunNotEnded,
+    #[error("The stop pointer of the missing builtin \"{builtin_name}\" must be 0.")]
+    NonZeroMissingBuiltinStopPointer { builtin_name: String },
+    #[error("Cannot add the return values to the public memory after segment finalization.")]
+    CannotAddReturnValuesAfterSegmentFinalization,
 }
 
 impl CairoRunner {
@@ -99,11 +121,22 @@ impl CairoRunner {
             }
         }
 
-        // TODO: implement the following Python code
+        let mut builtin_runners = HashMap::new();
+
+        let mut builtin_factories: HashMap<String, Box<BuiltinRunnerFactory>> = HashMap::new();
+        builtin_factories.insert(String::from("output"), Box::new(output_builtin_factory));
+        builtin_factories.insert(String::from("pedersen"), Box::new(pedersen_builtin_factory));
+        builtin_factories.insert(
+            String::from("range_check"),
+            Box::new(range_check_builtin_factory),
+        );
+        builtin_factories.insert(String::from("ecdsa"), Box::new(ecdsa_builtin_factory));
+        builtin_factories.insert(String::from("bitwise"), Box::new(bitwise_builtin_factory));
+
+        // TODO: implement the following builtin factories
         //
         // ```python
         // builtin_factories = dict(
-        //     output=lambda name, included: OutputBuiltinRunner(included=included),
         //     pedersen=lambda name, included: HashBuiltinRunner(
         //         name=name,
         //         included=included,
@@ -127,24 +160,33 @@ impl CairoRunner {
         //         included=included, bitwise_builtin=instance.builtins["bitwise"]
         //     ),
         // )
-        //
-        // for name in instance.builtins:
-        //     factory = builtin_factories.get(name)
-        //     assert factory is not None, f"The {name} builtin is not supported."
-        //     included = name in self.program.builtins
-        //     # In proof mode all the builtin_runners are required.
-        //     if included or self.proof_mode:
-        //         self.builtin_runners[f"{name}_builtin"] = factory(  # type: ignore
-        //             name=name, included=included
-        //         )
-        //
-        // supported_builtin_list = list(builtin_factories.keys())
-        // err_msg = (
-        //     f"The builtins specified by the %builtins directive must be subsequence of "
-        //     f"{supported_builtin_list}. Got {self.program.builtins}."
-        // )
-        // assert is_subsequence(self.program.builtins, supported_builtin_list), err_msg
         // ```
+
+        let supported_builtin_list: Vec<String> = builtin_factories.keys().cloned().collect();
+        if program
+            .builtins()
+            .iter()
+            .any(|item| !supported_builtin_list.contains(item))
+        {
+            return Err(Error::BuiltinsNotSubsequence {
+                supported_builtin_list,
+                program_builtins: program.builtins().to_vec(),
+            });
+        }
+
+        for (name, _) in instance.builtins.iter() {
+            let factory = builtin_factories
+                .get(name)
+                .ok_or(Error::BuiltinNotSupported {
+                    name: name.to_owned(),
+                })?;
+            let included = program.builtins().contains(name);
+
+            // In proof mode all the builtin_runners are required.
+            if included || proof_mode {
+                builtin_runners.insert(format!("{}_builtin", &name), factory(name, included));
+            }
+        }
 
         let memory = Rc::new(RefCell::new(memory));
 
@@ -153,7 +195,7 @@ impl CairoRunner {
         Ok(Self {
             program,
             instance,
-            builtin_runners: Rc::new(HashMap::new()),
+            builtin_runners: Rc::new(RefCell::new(builtin_runners)),
             original_steps: None,
             proof_mode,
             allow_missing_builtins,
@@ -181,13 +223,10 @@ impl CairoRunner {
         // Execution segment.
         self.execution_base = Some(self.segments.add(None));
 
-        // TODO: implement the following Python code
-        //
-        // ```python
-        // # Builtin segments.
-        // for builtin_runner in self.builtin_runners.values():
-        //     builtin_runner.initialize_segments(self)
-        // ```
+        // Builtin segments.
+        for builtin_runner in self.builtin_runners.borrow_mut().values_mut() {
+            builtin_runner.initialize_segments(&mut self.segments);
+        }
     }
 
     /// Initializes state for running a program from the main() entrypoint. If self.proof_mode ==
@@ -197,18 +236,27 @@ impl CairoRunner {
     pub fn initialize_main_entrypoint(&mut self) -> Result<RelocatableValue, Error> {
         self.execution_public_memory = Some(vec![]);
 
-        let stack: Vec<RelocatableValue> = vec![];
-        // TODO: implement the following Python code
-        //
-        // ```python
-        // for builtin_name in self.program.builtins:
-        //     builtin_runner = self.builtin_runners.get(f"{builtin_name}_builtin")
-        //     if builtin_runner is None:
-        //         assert self.allow_missing_builtins, "Missing builtin."
-        //         stack += [0]
-        //     else:
-        //         stack += builtin_runner.initial_stack()
-        // ```
+        let mut stack: Vec<MaybeRelocatable> = vec![];
+        for builtin_name in self.program.builtins().iter() {
+            match self
+                .builtin_runners
+                .borrow_mut()
+                .get_mut(&format!("{}_builtin", builtin_name))
+            {
+                Some(builtin_runner) => {
+                    for item in builtin_runner.initial_stack().into_iter() {
+                        stack.push(item);
+                    }
+                }
+                None => {
+                    if !self.allow_missing_builtins {
+                        return Err(Error::MissingBuiltin);
+                    } else {
+                        stack.push(MaybeRelocatable::Int(BigInt::from(0u8)));
+                    }
+                }
+            }
+        }
 
         if self.proof_mode {
             // TODO: implement the following Python code
@@ -232,7 +280,7 @@ impl CairoRunner {
             let return_fp = self.segments.add(None);
 
             match self.program.main() {
-                Some(main) => self.initialize_function_entrypoint(&main, stack, return_fp),
+                Some(main) => self.initialize_function_entrypoint(&main, stack, return_fp.into()),
                 None => Err(Error::MissingMain),
             }
         }
@@ -241,13 +289,13 @@ impl CairoRunner {
     pub fn initialize_function_entrypoint(
         &mut self,
         entrypoint: &BigInt,
-        args: Vec<RelocatableValue>,
-        return_fp: RelocatableValue,
+        args: Vec<MaybeRelocatable>,
+        return_fp: MaybeRelocatable,
     ) -> Result<RelocatableValue, Error> {
         let end = self.segments.add(None);
         let mut stack = args;
         stack.push(return_fp);
-        stack.push(end.clone());
+        stack.push(end.clone().into());
 
         self.initialize_state(entrypoint, &stack)?;
         self.initial_fp = Some(self.execution_base()?.to_owned() + &BigInt::from(stack.len()));
@@ -260,7 +308,7 @@ impl CairoRunner {
     pub fn initialize_state(
         &mut self,
         entrypoint: &BigInt,
-        stack: &[RelocatableValue],
+        stack: &[MaybeRelocatable],
     ) -> Result<(), Error> {
         self.initial_pc = Some(self.program_base()?.to_owned() + entrypoint);
 
@@ -278,10 +326,7 @@ impl CairoRunner {
         // Load stack.
         self.load_data(
             self.execution_base()?.to_owned().into(),
-            &stack
-                .iter()
-                .map(|item| item.to_owned().into())
-                .collect::<Vec<_>>(),
+            &stack.iter().map(|item| item.to_owned()).collect::<Vec<_>>(),
         );
 
         Ok(())
@@ -413,6 +458,55 @@ impl CairoRunner {
         Ok(())
     }
 
+    /// Reads builtin return values (end pointers) and adds them to the public memory.
+    /// Note: end_run() must precede a call to this method.
+    pub fn read_return_values(&self) -> Result<(), Error> {
+        if !self.run_ended {
+            return Err(Error::RunNotEnded);
+        }
+
+        let mut pointer = self.vm()?.run_context.borrow().ap.clone();
+        for builtin_name in self.program.builtins().iter().rev() {
+            match self
+                .builtin_runners
+                .borrow_mut()
+                .get_mut(&format!("{}_builtin", builtin_name))
+            {
+                Some(builtin_runner) => {
+                    pointer = builtin_runner.final_stack(self, pointer)?;
+                }
+                None => {
+                    if !self.allow_missing_builtins {
+                        return Err(Error::MissingBuiltin);
+                    }
+                    pointer = pointer - &BigInt::from(1u32).into();
+                    if self.memory.borrow_mut().index(&pointer)?
+                        != MaybeRelocatable::Int(BigInt::from(0u32))
+                    {
+                        return Err(Error::NonZeroMissingBuiltinStopPointer {
+                            builtin_name: builtin_name.to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if self.segments_finalized {
+            return Err(Error::CannotAddReturnValuesAfterSegmentFinalization);
+        }
+
+        // TODO: implement the following Python code
+        //
+        // ```python
+        // # Add return values to public memory.
+        // self.execution_public_memory += list(
+        //     range(pointer - self.execution_base, self.vm.run_context.ap - self.execution_base)
+        // )
+        // ```
+
+        Ok(())
+    }
+
     /// Writes data into the memory at address ptr and returns the first address after the data.
     pub fn load_data(
         &mut self,
@@ -479,6 +573,32 @@ impl From<VirtualMachineError> for Error {
     }
 }
 
+impl From<BuiltinRunnerError> for Error {
+    fn from(value: BuiltinRunnerError) -> Self {
+        Self::BuiltinRunnerError(value)
+    }
+}
+
+fn output_builtin_factory(_name: &str, included: bool) -> Box<dyn BuiltinRunner> {
+    Box::new(OutputBuiltinRunner::new(included))
+}
+
+fn pedersen_builtin_factory(_name: &str, _included: bool) -> Box<dyn BuiltinRunner> {
+    todo!()
+}
+
+fn range_check_builtin_factory(_name: &str, _included: bool) -> Box<dyn BuiltinRunner> {
+    todo!()
+}
+
+fn ecdsa_builtin_factory(_name: &str, _included: bool) -> Box<dyn BuiltinRunner> {
+    todo!()
+}
+
+fn bitwise_builtin_factory(_name: &str, _included: bool) -> Box<dyn BuiltinRunner> {
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,7 +606,7 @@ mod tests {
     use crate::cairo::lang::compiler::program::FullProgram;
 
     #[test]
-    fn run() {
+    fn test_run_past_end() {
         let program = serde_json::from_str::<FullProgram>(include_str!(
             "../../../../test-data/artifacts/run_past_end.json"
         ))
@@ -509,5 +629,58 @@ mod tests {
         runner.run_until_pc(end.into(), None).unwrap();
 
         runner.end_run(false, false).unwrap();
+
+        runner.read_return_values().unwrap();
+    }
+
+    #[test]
+    fn test_bad_stop_ptr() {
+        let program = serde_json::from_str::<FullProgram>(include_str!(
+            "../../../../test-data/artifacts/bad_stop_ptr.json"
+        ))
+        .unwrap();
+
+        let mut runner = CairoRunner::new(
+            Rc::new(program.into()),
+            CairoLayout::small_instance(),
+            MemoryDict::new(),
+            false,
+            false,
+        )
+        .unwrap();
+
+        runner.initialize_segments();
+        let end = runner.initialize_main_entrypoint().unwrap();
+
+        runner.initialize_vm(HashMap::new(), None).unwrap();
+
+        runner.run_until_pc(end.into(), None).unwrap();
+
+        runner.end_run(false, false).unwrap();
+
+        match runner.read_return_values() {
+            Err(Error::BuiltinRunnerError(BuiltinRunnerError::InvalidStopPointer {
+                builtin_name,
+                expected,
+                found,
+            })) => {
+                assert_eq!(builtin_name, "output");
+                assert_eq!(
+                    expected,
+                    RelocatableValue {
+                        segment_index: BigInt::from(2u8),
+                        offset: BigInt::from(1u8)
+                    }
+                );
+                assert_eq!(
+                    found,
+                    RelocatableValue {
+                        segment_index: BigInt::from(2u8),
+                        offset: BigInt::from(3u8)
+                    }
+                );
+            }
+            _ => panic!("unexpected result"),
+        }
     }
 }

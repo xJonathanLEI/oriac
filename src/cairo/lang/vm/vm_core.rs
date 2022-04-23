@@ -5,7 +5,7 @@ use crate::cairo::lang::{
         program::{FullProgram, Program},
     },
     vm::{
-        builtin_runner::BuiltinRunner,
+        cairo_runner::BuiltinRunnerMap,
         memory_dict::{Error as MemoryDictError, MemoryDict},
         relocatable::{MaybeRelocatable, RelocatableValue},
         trace_entry::TraceEntry,
@@ -61,7 +61,7 @@ pub struct VirtualMachine {
     // START: Fields from `VirtualMachineBase` in Python
     // //////////
     pub prime: BigInt,
-    pub builtin_runners: Rc<HashMap<String, BuiltinRunner>>,
+    pub builtin_runners: Rc<RefCell<BuiltinRunnerMap>>,
     pub exec_scopes: Vec<HashMap<String, ()>>,
     pub hints: HashMap<RelocatableValue, Vec<CompiledHint>>,
     /// A map from hint id to pc and index (index is required when there is more than one hint for a
@@ -242,11 +242,12 @@ impl VirtualMachine {
         run_context: Rc<RefCell<RunContext>>,
         hint_locals: HashMap<String, ()>,
         static_locals: Option<HashMap<String, ()>>,
-        builtin_runners: Option<Rc<HashMap<String, BuiltinRunner>>>,
+        builtin_runners: Option<Rc<RefCell<BuiltinRunnerMap>>>,
         program_base: Option<MaybeRelocatable>,
     ) -> Self {
         let program_base = program_base.unwrap_or_else(|| run_context.borrow().pc.clone());
-        let builtin_runners = builtin_runners.unwrap_or_else(|| Rc::new(HashMap::new()));
+        let builtin_runners =
+            builtin_runners.unwrap_or_else(|| Rc::new(RefCell::new(HashMap::new())));
 
         // A set to track the memory addresses accessed by actual Cairo instructions (as opposed to
         // hints), necessary for accurate counting of memory holes.
@@ -710,14 +711,25 @@ impl VirtualMachine {
         instruction
     }
 
-    #[allow(unused)]
     pub fn opcode_assertions(
         &self,
         instruction: &Instruction,
         operands: &Operands,
     ) -> Result<(), VirtualMachineError> {
         match instruction.opcode {
-            Opcode::ASSERT_EQ => todo!(),
+            Opcode::ASSERT_EQ => match &operands.res {
+                Some(res) => {
+                    if &operands.dst != res && !check_eq(&operands.dst, res) {
+                        Err(VirtualMachineError::AssertEqFailed {
+                            dst: operands.dst.clone(),
+                            res: res.to_owned(),
+                        })
+                    } else {
+                        Ok(())
+                    }
+                }
+                None => Err(VirtualMachineError::AssertEqWithUnconstrained),
+            },
             Opcode::CALL => todo!(),
             Opcode::RET => Ok(()),
             Opcode::NOP => Ok(()),

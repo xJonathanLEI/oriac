@@ -30,6 +30,10 @@ pub enum Error {
     MemoryNotFrozen,
     #[error(transparent)]
     SecurityError(SecurityError),
+    #[error("compute_effective_sizes must be called before get_segment_used_size.")]
+    ComputeEffectiveSizesNotCalled,
+    #[error("memory segment not found")]
+    SegmentNotFound,
 }
 
 impl MemorySegmentManager {
@@ -138,5 +142,15 @@ impl MemorySegmentManager {
                 .index_set(ptr.clone() + &BigInt::from(i), v.to_owned());
         }
         ptr + &BigInt::from(data.len())
+    }
+
+    pub fn get_segment_used_size(&self, segment_index: BigInt) -> Result<BigInt, Error> {
+        match &self.segment_used_sizes {
+            Some(segment_used_sizes) => Ok(segment_used_sizes
+                .get(&segment_index)
+                .ok_or(Error::SegmentNotFound)?
+                .to_owned()),
+            None => Err(Error::ComputeEffectiveSizesNotCalled),
+        }
     }
 }
