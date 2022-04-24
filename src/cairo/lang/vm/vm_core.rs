@@ -668,7 +668,7 @@ impl VirtualMachine {
             if let (Opcode::ASSERT_EQ, Some(res)) = (&instruction.opcode, &res) {
                 dst = Some(res.to_owned());
             } else if matches!(instruction.opcode, Opcode::CALL) {
-                dst = Some(self.run_context.borrow().pc.clone());
+                dst = Some(self.run_context.borrow().fp.clone());
             }
         }
 
