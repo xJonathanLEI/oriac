@@ -96,6 +96,10 @@ pub enum Error {
     NonZeroMissingBuiltinStopPointer { builtin_name: String },
     #[error("Cannot add the return values to the public memory after segment finalization.")]
     CannotAddReturnValuesAfterSegmentFinalization,
+    #[error("Unexpected builtin type")]
+    UnexpectedBuiltinType,
+    #[error("Unexpected None value")]
+    UnexpectedNoneValue,
 }
 
 impl CairoRunner {
@@ -514,6 +518,45 @@ impl CairoRunner {
         data: &[MaybeRelocatable],
     ) -> MaybeRelocatable {
         self.segments.load_data(ptr, data)
+    }
+
+    // TODO: implement `output_callback`
+    pub fn print_output(&self) -> Result<(), Error> {
+        if let Some(output_runner) = self.builtin_runners.borrow().get("output_builtin") {
+            let output_runner = output_runner
+                .as_any()
+                .downcast_ref::<OutputBuiltinRunner>()
+                .ok_or(Error::UnexpectedBuiltinType)?;
+
+            println!("Program output:");
+
+            let (_, size) = output_runner.get_used_cells_and_allocated_size(self)?;
+            let mut i = BigInt::from(0u32);
+            while i < size {
+                match self.memory.borrow_mut().get(
+                    &(output_runner
+                        .base
+                        .clone()
+                        .ok_or(Error::UnexpectedNoneValue)?
+                        + &i)
+                        .into(),
+                    None,
+                ) {
+                    Some(val) => {
+                        println!("  {}", val);
+                    }
+                    None => {
+                        println!("  <missing>");
+                    }
+                }
+
+                i += BigInt::from(1u32);
+            }
+
+            println!();
+        }
+
+        Ok(())
     }
 
     fn program_base(&self) -> Result<&RelocatableValue, Error> {

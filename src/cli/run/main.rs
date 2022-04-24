@@ -25,6 +25,11 @@ struct Args {
     program: PathBuf,
     #[clap(long, help = "The layout of the Cairo AIR.", default_value = "plain", possible_values = ["plain", "small"])]
     layout: Layout,
+    #[clap(
+        long,
+        help = "Prints the program output (if the output builtin is used)."
+    )]
+    print_output: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +69,10 @@ fn main() -> Result<(), Error> {
     runner.end_run(false, false).unwrap();
 
     runner.read_return_values().unwrap();
+
+    if args.print_output {
+        runner.print_output().unwrap();
+    }
 
     Ok(())
 }

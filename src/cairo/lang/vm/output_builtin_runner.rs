@@ -6,7 +6,7 @@ use crate::cairo::lang::vm::{
 };
 
 use num_bigint::BigInt;
-use std::collections::HashMap;
+use std::{any::Any, collections::HashMap};
 
 #[derive(Debug)]
 pub struct PublicMemoryPage {
@@ -103,5 +103,17 @@ impl BuiltinRunner for OutputBuiltinRunner {
         );
 
         Ok(size?)
+    }
+
+    fn get_used_cells_and_allocated_size(
+        &self,
+        runner: &CairoRunner,
+    ) -> Result<(BigInt, BigInt), BuiltinRunnerError> {
+        let size = self.get_used_cells(runner)?;
+        Ok((size.clone(), size))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }

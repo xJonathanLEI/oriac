@@ -6,6 +6,7 @@ use crate::cairo::lang::vm::{
 };
 
 use num_bigint::BigInt;
+use std::any::Any;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -41,6 +42,15 @@ pub trait BuiltinRunner: std::fmt::Debug {
 
     /// Returns the number of used cells.
     fn get_used_cells(&self, runner: &CairoRunner) -> Result<BigInt, Error>;
+
+    /// Returns the number of used cells and the allocated size, and raises
+    /// InsufficientAllocatedCells if there are more used cells than allocated cells.
+    fn get_used_cells_and_allocated_size(
+        &self,
+        runner: &CairoRunner,
+    ) -> Result<(BigInt, BigInt), Error>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 impl From<MemoryError> for Error {
