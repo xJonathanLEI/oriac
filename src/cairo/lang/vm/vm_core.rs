@@ -130,6 +130,16 @@ pub enum VirtualMachineError {
         current_value: MaybeRelocatable,
         new_value: MaybeRelocatable,
     },
+    #[error("Call failed to write return-pc (inconsistent op0): {op0} != {return_pc}. Did you forget to increment ap?")]
+    FailedToWriteReturnPc {
+        op0: MaybeRelocatable,
+        return_pc: MaybeRelocatable,
+    },
+    #[error("Call failed to write return-fp (inconsistent dst): {dst} != {return_fp}. Did you forget to increment ap?")]
+    FailedToWriteReturnFp {
+        dst: MaybeRelocatable,
+        return_fp: MaybeRelocatable,
+    },
 }
 
 impl Debug for Rule {
@@ -730,7 +740,24 @@ impl VirtualMachine {
                 }
                 None => Err(VirtualMachineError::AssertEqWithUnconstrained),
             },
-            Opcode::CALL => todo!(),
+            Opcode::CALL => {
+                let return_pc =
+                    self.run_context.borrow().pc.clone() + &BigInt::from(instruction.size());
+                if operands.op0 != return_pc && !check_eq(&operands.op0, &return_pc) {
+                    return Err(VirtualMachineError::FailedToWriteReturnPc {
+                        op0: operands.op0.clone(),
+                        return_pc,
+                    });
+                }
+                let return_fp = self.run_context.borrow().fp.clone();
+                if operands.dst != return_fp && !check_eq(&operands.dst, &return_fp) {
+                    return Err(VirtualMachineError::FailedToWriteReturnFp {
+                        dst: operands.dst.clone(),
+                        return_fp,
+                    });
+                }
+                Ok(())
+            }
             Opcode::RET => Ok(()),
             Opcode::NOP => Ok(()),
         }
