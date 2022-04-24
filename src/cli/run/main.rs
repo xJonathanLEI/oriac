@@ -9,13 +9,22 @@ use std::{
     fs::File,
     path::{Path, PathBuf},
     rc::Rc,
+    str::FromStr,
 };
+
+#[derive(Debug)]
+enum Layout {
+    Plain,
+    Small,
+}
 
 #[derive(Debug, Parser)]
 #[clap(author, version, about = "A tool to run Cairo programs.", long_about = None)]
 struct Args {
     #[clap(long, help = "The name of the program json file.")]
     program: PathBuf,
+    #[clap(long, help = "The layout of the Cairo AIR.", default_value = "plain", possible_values = ["plain", "small"])]
+    layout: Layout,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -31,9 +40,14 @@ fn main() -> Result<(), Error> {
 
     let program = load_program(&args.program)?;
 
+    let instance = match args.layout {
+        Layout::Plain => CairoLayout::plain_instance(),
+        Layout::Small => CairoLayout::small_instance(),
+    };
+
     let mut runner = CairoRunner::new(
         Rc::new(program.into()),
-        CairoLayout::plain_instance(),
+        instance,
         MemoryDict::new(),
         false,
         false,
@@ -48,6 +62,8 @@ fn main() -> Result<(), Error> {
     runner.run_until_pc(end.into(), None).unwrap();
 
     runner.end_run(false, false).unwrap();
+
+    runner.read_return_values().unwrap();
 
     Ok(())
 }
@@ -66,5 +82,17 @@ impl From<std::io::Error> for Error {
 impl From<serde_json::Error> for Error {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)
+    }
+}
+
+impl FromStr for Layout {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "plain" => Ok(Layout::Plain),
+            "small" => Ok(Layout::Small),
+            _ => Err("unknown layout"),
+        }
     }
 }
