@@ -63,10 +63,10 @@ pub struct VirtualMachine {
     pub prime: BigInt,
     pub builtin_runners: Rc<RefCell<BuiltinRunnerMap>>,
     pub exec_scopes: Vec<HashMap<String, ()>>,
-    pub hints: HashMap<RelocatableValue, Vec<CompiledHint>>,
+    pub hints: HashMap<MaybeRelocatable, Vec<CompiledHint>>,
     /// A map from hint id to pc and index (index is required when there is more than one hint for a
     /// single pc).
-    pub hint_pc_and_index: HashMap<BigInt, (RelocatableValue, BigInt)>,
+    pub hint_pc_and_index: HashMap<BigInt, (MaybeRelocatable, BigInt)>,
     pub instruction_debug_info: (),
     pub debug_file_contents: (),
     pub error_message_attributes: (),
@@ -140,6 +140,8 @@ pub enum VirtualMachineError {
         dst: MaybeRelocatable,
         return_fp: MaybeRelocatable,
     },
+    #[error(transparent)]
+    HintCompileError(rustpython::vm::compile::CompileError),
 }
 
 impl Debug for Rule {
@@ -387,8 +389,68 @@ impl VirtualMachine {
         self.run_instruction(&instruction)
     }
 
-    #[allow(unused)]
-    pub fn load_program(&mut self, program: &FullProgram, program_base: MaybeRelocatable) {
+    pub fn load_hints(
+        &mut self,
+        program: &FullProgram,
+        program_base: MaybeRelocatable,
+    ) -> Result<(), VirtualMachineError> {
+        // TODO: change to only compile the hint when no Rust port is available
+
+        for (pc, hints) in program.hints.iter() {
+            let mut compiled_hints = vec![];
+            for (hint_index, hint) in hints.iter().enumerate() {
+                let hint_id = self.hint_pc_and_index.len();
+                self.hint_pc_and_index.insert(
+                    hint_id.into(),
+                    (
+                        MaybeRelocatable::Int(pc.to_owned()) + &program_base,
+                        hint_index.into(),
+                    ),
+                );
+                compiled_hints.push(CompiledHint {
+                    compiled: rustpython::vm::compile::compile(
+                        &hint.code,
+                        rustpython::vm::compile::Mode::Exec,
+                        format!("<hint{}>", hint_id),
+                        rustpython::vm::compile::CompileOpts::default(),
+                    )?,
+                    consts: (),
+                });
+
+                // TODO: implement the following Python code
+                //
+                // ```python
+                // # Use hint=hint in the lambda's arguments to capture this value (otherwise,
+                // # it will use the same hint object for all iterations).
+                // consts=lambda pc, ap, fp, memory, hint=hint: VmConsts(
+                //     context=VmConstsContext(
+                //         identifiers=program.identifiers,
+                //         evaluator=ExpressionEvaluator(
+                //             self.prime, ap, fp, memory, program.identifiers
+                //         ).eval,
+                //         reference_manager=program.reference_manager,
+                //         flow_tracking_data=hint.flow_tracking_data,
+                //         memory=memory,
+                //         pc=pc,
+                //     ),
+                //     accessible_scopes=hint.accessible_scopes,
+                // ),
+                // ```
+            }
+            self.hints.insert(
+                MaybeRelocatable::Int(pc.to_owned()) + &program_base,
+                compiled_hints,
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn load_program(
+        &mut self,
+        program: &FullProgram,
+        program_base: MaybeRelocatable,
+    ) -> Result<(), VirtualMachineError> {
         // TODO: change to use `Result` for graceful error handling
         if self.prime != program.prime {
             panic!(
@@ -401,13 +463,21 @@ impl VirtualMachine {
         //
         // ```python
         // self.load_debug_info(program.debug_info, program_base)
-        // self.load_hints(program, program_base)
+        // ```
+
+        self.load_hints(program, program_base)?;
+
+        // TODO: implement the following Python code
+        //
+        // ```python
         // self.error_message_attributes.extend(
         //     VmAttributeScope.from_attribute_scope(attr=attr, program_base=program_base)
         //     for attr in program.attributes
         //     if attr.name == ERROR_MESSAGE_ATTRIBUTE
         // )
         // ```
+
+        Ok(())
     }
 
     pub fn update_registers(
@@ -897,6 +967,12 @@ impl From<MemoryDictError> for VirtualMachineError {
 impl From<PureValueError> for VirtualMachineError {
     fn from(value: PureValueError) -> Self {
         VirtualMachineError::PureValueError(value)
+    }
+}
+
+impl From<rustpython::vm::compile::CompileError> for VirtualMachineError {
+    fn from(value: rustpython::vm::compile::CompileError) -> Self {
+        VirtualMachineError::HintCompileError(value)
     }
 }
 
