@@ -428,7 +428,9 @@ impl VirtualMachine {
         // Update ap.
         let new_ap_value = match instruction.ap_update {
             ApUpdate::ADD => match &operands.res {
-                Some(res) => Some(res.to_owned() % &self.prime),
+                Some(res) => {
+                    Some(self.run_context.borrow().ap.clone() + &(res.to_owned() % &self.prime))
+                }
                 None => return Err(VirtualMachineError::AddWithUnconstrained),
             },
             ApUpdate::ADD1 => Some(self.run_context.borrow().ap.clone() + &BigInt::from(1)),
