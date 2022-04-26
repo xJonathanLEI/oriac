@@ -12,6 +12,14 @@ This project contains the following command line tools:
 
 - `oriac-run`: (_very_ early WIP) a drop-in replacement for `cairo-run`
 
+## Contributions
+
+First of all, big thanks to everyone offering help on this project!
+
+One of the reasons I'm building this project is to learn every single detail of how Cairo works under the hood, and accepting feature contributions means missing out learning opportunities (I can still learn by reading PRs, but that's not as good as writing it myself), so unfortunately contributions for new features are not accepted at the moment. Bug fixes, however, are more than welcomed :)
+
+Once the project reaches reasonable maturity, as measured by the set of Cairo programs it's able to run, this restriction will be removed.
+
 ## License
 
 Licensed under either of
