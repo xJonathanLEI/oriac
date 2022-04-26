@@ -16,6 +16,7 @@ use crate::cairo::lang::{
 };
 
 use num_bigint::BigInt;
+use rustpython::vm::PyPayload;
 use std::{
     borrow::BorrowMut,
     cell::RefCell,
@@ -142,6 +143,11 @@ pub enum VirtualMachineError {
     },
     #[error(transparent)]
     HintCompileError(rustpython::vm::compile::CompileError),
+    #[error("Got an exception while executing a hint ({hint_index}): {exception}")]
+    HintExecuteError {
+        hint_index: usize,
+        exception: String,
+    },
 }
 
 impl Debug for Rule {
@@ -352,35 +358,65 @@ impl VirtualMachine {
     pub fn step(&mut self) -> Result<(), VirtualMachineError> {
         self.skip_instruction_execution = false;
 
-        // Hints not yet implemented
-        // TODO: implement the following Python code
-        //
-        // ```python
-        // # Execute hints.
-        // for hint_index, hint in enumerate(self.hints.get(self.run_context.pc, [])):
-        //     exec_locals = self.exec_scopes[-1]
-        //     exec_locals["memory"] = memory = self.validated_memory
-        //     exec_locals["ap"] = ap = self.run_context.ap
-        //     exec_locals["fp"] = fp = self.run_context.fp
-        //     exec_locals["pc"] = pc = self.run_context.pc
-        //     exec_locals["current_step"] = self.current_step
-        //     exec_locals["ids"] = hint.consts(pc, ap, fp, memory)
-        //
-        //     exec_locals["vm_load_program"] = self.load_program
-        //     exec_locals["vm_enter_scope"] = self.enter_scope
-        //     exec_locals["vm_exit_scope"] = self.exit_scope
-        //     exec_locals.update(self.static_locals)
-        //
-        //     self.exec_hint(hint.compiled, exec_locals, hint_index=hint_index)
-        //
-        //     # Clear ids (which will be rewritten by the next hint anyway) to make the VM instance
-        //     # smaller and faster to copy.
-        //     del exec_locals["ids"]
-        //     del exec_locals["memory"]
-        //
-        //     if self.skip_instruction_execution:
-        //         return
-        // ```
+        // Execute hints.
+        if let Some(hints) = self.hints.get(&self.run_context.borrow().pc) {
+            for (hint_index, hint) in hints.iter().enumerate() {
+                // TODO: implement the following Python code
+                //
+                // ```python
+                // exec_locals = self.exec_scopes[-1]
+                // exec_locals["memory"] = memory = self.validated_memory
+                // exec_locals["ap"] = ap = self.run_context.ap
+                // exec_locals["fp"] = fp = self.run_context.fp
+                // exec_locals["pc"] = pc = self.run_context.pc
+                // exec_locals["current_step"] = self.current_step
+                // exec_locals["ids"] = hint.consts(pc, ap, fp, memory)
+                //
+                // exec_locals["vm_load_program"] = self.load_program
+                // exec_locals["vm_enter_scope"] = self.enter_scope
+                // exec_locals["vm_exit_scope"] = self.exit_scope
+                // exec_locals.update(self.static_locals)
+                // ```
+
+                // This will almost always fail as globals injection has not been implemented
+                rustpython::vm::Interpreter::default().enter(|vm| {
+                    let scope = vm.new_scope_with_builtins();
+
+                    match vm.run_code_obj(
+                        rustpython::vm::builtins::PyCode::new(
+                            vm.map_codeobj(hint.compiled.clone()),
+                        )
+                        .into_ref(vm),
+                        scope,
+                    ) {
+                        Ok(value) => Ok(value),
+                        Err(err) => {
+                            // unwrap() here should be safe
+                            let mut err_str = String::new();
+                            vm.write_exception(&mut err_str, &err).unwrap();
+
+                            Err(VirtualMachineError::HintExecuteError {
+                                hint_index,
+                                exception: err_str,
+                            })
+                        }
+                    }
+                })?;
+
+                // TODO: implement the following Python code
+                //
+                // ```python
+                // # Clear ids (which will be rewritten by the next hint anyway) to make the VM instance
+                // # smaller and faster to copy.
+                // del exec_locals["ids"]
+                // del exec_locals["memory"]
+                // ```
+
+                if self.skip_instruction_execution {
+                    return Ok(());
+                }
+            }
+        }
 
         // Decode.
         let instruction = self.decode_current_instruction();
