@@ -11,11 +11,9 @@ use oriac::cairo::lang::{
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     let program: Rc<Program> = Rc::new(
-        serde_json::from_str::<FullProgram>(include_str!(
-            "../test-data/artifacts/run_past_end.json"
-        ))
-        .unwrap()
-        .into(),
+        serde_json::from_str::<FullProgram>(include_str!("../tutorial.json"))
+            .unwrap()
+            .into(),
     );
 
     c.bench_function("run_past_end", |b| {
@@ -23,7 +21,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             black_box({
                 let mut runner = CairoRunner::new(
                     program.clone(),
-                    CairoLayout::plain_instance(),
+                    CairoLayout::small_instance(),
                     MemoryDict::new(),
                     false,
                     false,
@@ -31,7 +29,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
                 .unwrap();
                 runner.initialize_segments();
                 let end = runner.initialize_main_entrypoint().unwrap();
-                runner.initialize_vm(HashMap::new(), None).unwrap();
+                runner.initialize_vm(HashMap::new(), ()).unwrap();
                 runner.run_until_pc(end.into(), None).unwrap();
                 runner.end_run(false, false).unwrap();
             });

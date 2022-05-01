@@ -5,10 +5,9 @@ use crate::cairo::lang::vm::{
 
 use num_bigint::BigInt;
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
     fmt::Debug,
-    rc::Rc,
+    sync::{Arc, Mutex},
 };
 
 pub struct ValidationRule {
@@ -20,7 +19,7 @@ pub struct ValidationRule {
 /// Validation is done according to the validation rules.
 #[derive(Debug)]
 pub struct ValidatedMemoryDict {
-    pub memory: Rc<RefCell<MemoryDict>>,
+    pub memory: Arc<Mutex<MemoryDict>>,
     /// validation_rules contains a mapping from a segment index to a list of functions (and a tuple
     /// of additional arguments) that may try to validate the value of memory cells in the segment
     /// (sometimes based on other memory cells).
@@ -36,7 +35,7 @@ impl Debug for ValidationRule {
 }
 
 impl ValidatedMemoryDict {
-    pub fn new(memory: Rc<RefCell<MemoryDict>>) -> Self {
+    pub fn new(memory: Arc<Mutex<MemoryDict>>) -> Self {
         Self {
             memory,
             validation_rules: HashMap::new(),
@@ -49,16 +48,17 @@ impl ValidatedMemoryDict {
         addr: &MaybeRelocatable,
         default_value: Option<MaybeRelocatable>,
     ) -> Option<MaybeRelocatable> {
-        self.memory.borrow_mut().get(addr, default_value)
+        self.memory.lock().unwrap().get(addr, default_value)
     }
 
     pub fn index(&mut self, addr: &MaybeRelocatable) -> Result<MaybeRelocatable, MemoryDictError> {
-        self.memory.borrow_mut().index(addr)
+        self.memory.lock().unwrap().index(addr)
     }
 
     pub fn index_set(&mut self, addr: MaybeRelocatable, value: MaybeRelocatable) {
         self.memory
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .index_set(addr.clone(), value.clone());
         self.validate_memory_cell(addr, value);
     }
@@ -69,7 +69,7 @@ impl ValidatedMemoryDict {
                 if let Some(rules) = self.validation_rules.get(&addr.segment_index) {
                     for (rule, args) in rules.iter() {
                         let validated_addresses =
-                            (rule.inner)(&self.memory.as_ref().borrow(), &addr, args);
+                            (rule.inner)(&self.memory.lock().unwrap(), &addr, args);
                         for addr in validated_addresses.into_iter() {
                             self.validated_addresses.insert(addr);
                         }

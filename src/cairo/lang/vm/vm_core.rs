@@ -1,28 +1,37 @@
-use crate::cairo::lang::{
-    compiler::{
-        encode::decode_instruction,
-        instruction::{ApUpdate, FpUpdate, Instruction, Op1Addr, Opcode, PcUpdate, Register, Res},
-        program::{FullProgram, Program},
+use crate::{
+    cairo::lang::{
+        compiler::{
+            encode::decode_instruction,
+            instruction::{
+                ApUpdate, FpUpdate, Instruction, Op1Addr, Opcode, PcUpdate, Register, Res,
+            },
+            program::{FullProgram, Program},
+        },
+        vm::{
+            cairo_runner::BuiltinRunnerMap,
+            memory_dict::{Error as MemoryDictError, MemoryDict},
+            relocatable::{MaybeRelocatable, RelocatableValue},
+            trace_entry::TraceEntry,
+            validated_memory_dict::ValidatedMemoryDict,
+            virtual_machine_base::CompiledHint,
+            vm_exceptions::PureValueError,
+        },
     },
-    vm::{
-        cairo_runner::BuiltinRunnerMap,
-        memory_dict::{Error as MemoryDictError, MemoryDict},
-        relocatable::{MaybeRelocatable, RelocatableValue},
-        trace_entry::TraceEntry,
-        validated_memory_dict::ValidatedMemoryDict,
-        virtual_machine_base::CompiledHint,
-        vm_exceptions::PureValueError,
-    },
+    hint_support::HintLocals,
 };
 
 use num_bigint::BigInt;
-use rustpython::vm::PyPayload;
+use rustpython::vm::{
+    builtins::{PyIntRef, PyType},
+    types::SetAttr,
+    Interpreter, PyObjectRef, PyPayload, VirtualMachine as PythonVm,
+};
 use std::{
-    borrow::BorrowMut,
     cell::RefCell,
     collections::{HashMap, HashSet},
     fmt::Debug,
     rc::Rc,
+    sync::{Arc, Mutex},
 };
 
 pub struct Rule {
@@ -41,7 +50,7 @@ pub struct Operands {
 /// Contains a complete state of the virtual machine. This includes registers and memory.
 #[derive(Debug, Clone)]
 pub struct RunContext {
-    pub memory: Rc<RefCell<MemoryDict>>,
+    pub memory: Arc<Mutex<MemoryDict>>,
     pub pc: MaybeRelocatable,
     pub ap: MaybeRelocatable,
     pub fp: MaybeRelocatable,
@@ -56,7 +65,6 @@ pub enum RunContextError {
     UnknownOp0,
 }
 
-#[derive(Debug)]
 pub struct VirtualMachine {
     // //////////
     // START: Fields from `VirtualMachineBase` in Python
@@ -72,11 +80,12 @@ pub struct VirtualMachine {
     pub debug_file_contents: (),
     pub error_message_attributes: (),
     pub program: Rc<Program>,
-    pub validated_memory: ValidatedMemoryDict,
+    pub validated_memory: Arc<Mutex<ValidatedMemoryDict>>,
     /// auto_deduction contains a mapping from a memory segment index to a list of functions (and a
     /// tuple of additional arguments) that may try to automatically deduce the value of memory
     /// cells in the segment (based on other memory cells).
     pub auto_deduction: HashMap<BigInt, Vec<(Rule, ())>>,
+    pub static_locals: HintLocals,
     /// This flag can be set to true by hints to avoid the execution of the current step in step()
     /// (so that only the hint will be performed, but nothing else will happen).
     pub skip_instruction_execution: bool,
@@ -90,6 +99,7 @@ pub struct VirtualMachine {
     pub trace: Vec<TraceEntry<MaybeRelocatable>>,
     /// Current step.
     pub current_step: BigInt,
+    pub python_vm: Interpreter,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +160,33 @@ pub enum VirtualMachineError {
     },
 }
 
+impl Debug for VirtualMachine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VirtualMachine")
+            .field("prime", &self.prime)
+            .field("builtin_runners", &self.builtin_runners)
+            .field("exec_scopes", &self.exec_scopes)
+            .field("hints", &self.hints)
+            .field("hint_pc_and_index", &self.hint_pc_and_index)
+            .field("instruction_debug_info", &self.instruction_debug_info)
+            .field("debug_file_contents", &self.debug_file_contents)
+            .field("error_message_attributes", &self.error_message_attributes)
+            .field("program", &self.program)
+            .field("validated_memory", &self.validated_memory)
+            .field("auto_deduction", &self.auto_deduction)
+            .field("static_locals", &self.static_locals)
+            .field(
+                "skip_instruction_execution",
+                &self.skip_instruction_execution,
+            )
+            .field("run_context", &self.run_context)
+            .field("accessed_addresses", &self.accessed_addresses)
+            .field("trace", &self.trace)
+            .field("current_step", &self.current_step)
+            .finish()
+    }
+}
+
 impl Debug for Rule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "|Closure|")
@@ -158,7 +195,7 @@ impl Debug for Rule {
 
 impl RunContext {
     pub fn new(
-        memory: Rc<RefCell<MemoryDict>>,
+        memory: Arc<Mutex<MemoryDict>>,
         pc: MaybeRelocatable,
         ap: MaybeRelocatable,
         fp: MaybeRelocatable,
@@ -176,7 +213,7 @@ impl RunContext {
     /// Returns the encoded instruction (the value at pc) and the immediate value (the value at pc +
     /// 1, if it exists in the memory).
     pub fn get_instruction_encoding(&mut self) -> (BigInt, Option<BigInt>) {
-        let mut memory = self.memory.as_ref().borrow_mut();
+        let mut memory = self.memory.lock().unwrap();
 
         // TODO: check if it's safe to call unwrap here (probably not, change to proper error
         //       handling)
@@ -259,7 +296,7 @@ impl VirtualMachine {
         program: Rc<Program>,
         run_context: Rc<RefCell<RunContext>>,
         hint_locals: HashMap<String, ()>,
-        static_locals: Option<HashMap<String, ()>>,
+        static_locals: HintLocals,
         builtin_runners: Option<Rc<RefCell<BuiltinRunnerMap>>>,
         program_base: Option<MaybeRelocatable>,
     ) -> Self {
@@ -278,7 +315,9 @@ impl VirtualMachine {
         // START: `VirtualMachineBase` ctor logic
         // //////////
 
-        let validated_memory = ValidatedMemoryDict::new(run_context.borrow().memory.clone());
+        let validated_memory = Arc::new(Mutex::new(ValidatedMemoryDict::new(
+            run_context.borrow().memory.clone(),
+        )));
 
         let mut vm = Self {
             prime: program.prime().clone(),
@@ -292,11 +331,13 @@ impl VirtualMachine {
             program: program.clone(),
             validated_memory,
             auto_deduction: HashMap::new(),
+            static_locals,
             skip_instruction_execution: false,
             run_context,
             accessed_addresses,
             trace: vec![],
             current_step: BigInt::from(0),
+            python_vm: rustpython::vm::Interpreter::default(),
         };
 
         vm.enter_scope(Some(hint_locals));
@@ -379,8 +420,160 @@ impl VirtualMachine {
                 // ```
 
                 // This will almost always fail as globals injection has not been implemented
-                rustpython::vm::Interpreter::default().enter(|vm| {
+                self.python_vm.enter(|vm| {
                     let scope = vm.new_scope_with_builtins();
+
+                    // Import `static_locals`
+                    // TODO: generalize locals into traits instead of hard-coding
+
+                    //  let context = Context::default();
+                    //  let object = &context.types.object_type;
+                    //  let type_type = &context.types.type_type;
+
+                    //  let a = PyType::new_ref(
+                    //      "A",
+                    //      vec![object.clone()],
+                    //      PyAttributes::default(),
+                    //      Default::default(),
+                    //      type_type.clone(),
+                    //  )
+                    //  .unwrap();
+                    //
+
+                    let memory = self.validated_memory.clone();
+
+                    let memory_class = vm.ctx.new_class(
+                        None,
+                        "Memory",
+                        &vm.ctx.types.object_type,
+                        Default::default(),
+                    );
+
+                    PyType::setattro(
+                        &memory_class,
+                        vm.ctx.new_str("__setitem__"),
+                        Some(
+                            vm.ctx
+                                .new_method(
+                                    "__setitem__",
+                                    memory_class.clone(),
+                                    move |_self: PyObjectRef,
+                                          key: PyObjectRef,
+                                          value: PyObjectRef,
+                                          vm: &PythonVm| {
+                                        let key_segment_index: PyIntRef = key
+                                            .get_attr("segment_index", vm)
+                                            .unwrap()
+                                            .downcast()
+                                            .unwrap();
+                                        let key_offset: PyIntRef =
+                                            key.get_attr("offset", vm).unwrap().downcast().unwrap();
+
+                                        let value_segment_index: PyIntRef = value
+                                            .get_attr("segment_index", vm)
+                                            .unwrap()
+                                            .downcast()
+                                            .unwrap();
+                                        let value_offset: PyIntRef = value
+                                            .get_attr("offset", vm)
+                                            .unwrap()
+                                            .downcast()
+                                            .unwrap();
+
+                                        memory.lock().unwrap().index_set(
+                                            MaybeRelocatable::RelocatableValue(RelocatableValue {
+                                                segment_index: key_segment_index
+                                                    .as_bigint()
+                                                    .to_owned(),
+                                                offset: key_offset.as_bigint().to_owned(),
+                                            }),
+                                            MaybeRelocatable::RelocatableValue(RelocatableValue {
+                                                segment_index: value_segment_index
+                                                    .as_bigint()
+                                                    .to_owned(),
+                                                offset: value_offset.as_bigint().to_owned(),
+                                            }),
+                                        );
+                                    },
+                                )
+                                .into(),
+                        ),
+                        vm,
+                    )
+                    .unwrap();
+
+                    let memory_obj = vm.ctx.new_base_object(memory_class, None);
+
+                    scope.globals.set_item("memory", memory_obj, vm).unwrap();
+
+                    scope
+                        .globals
+                        .set_item(
+                            "ap",
+                            match &self.run_context.borrow().ap {
+                                MaybeRelocatable::RelocatableValue(value) => {
+                                    let relocatable_value_class = vm.ctx.new_class(
+                                        None,
+                                        "RelocatableValue",
+                                        &vm.ctx.types.object_type,
+                                        Default::default(),
+                                    );
+                                    relocatable_value_class.set_str_attr(
+                                        "segment_index",
+                                        vm.ctx.new_int(value.segment_index.clone()),
+                                    );
+                                    relocatable_value_class.set_str_attr(
+                                        "offset",
+                                        vm.ctx.new_int(value.offset.clone()),
+                                    );
+
+                                    vm.ctx.new_base_object(relocatable_value_class, None)
+                                }
+                                MaybeRelocatable::Int(value) => {
+                                    vm.ctx.new_int(value.to_owned()).into()
+                                }
+                            },
+                            vm,
+                        )
+                        .unwrap();
+
+                    let segments_class = vm.ctx.new_class(
+                        None,
+                        "Segments",
+                        &vm.ctx.types.object_type,
+                        Default::default(),
+                    );
+
+                    let segments = self.static_locals.segments.clone();
+
+                    segments_class.set_str_attr(
+                        "add",
+                        vm.ctx.new_function("fuck", move |vm: &PythonVm| {
+                            let new_segment = segments.lock().unwrap().add(None);
+
+                            let relocatable_value_class = vm.ctx.new_class(
+                                None,
+                                "RelocatableValue",
+                                &vm.ctx.types.object_type,
+                                Default::default(),
+                            );
+                            relocatable_value_class.set_str_attr(
+                                "segment_index",
+                                vm.ctx.new_int(new_segment.segment_index.clone()),
+                            );
+                            relocatable_value_class
+                                .set_str_attr("offset", vm.ctx.new_int(new_segment.offset));
+
+                            vm.ctx.new_base_object(relocatable_value_class, None)
+                        }),
+                    );
+
+                    let segments_obj = vm.ctx.new_base_object(segments_class, None);
+
+                    scope
+                        .globals
+                        .set_item("segments", segments_obj, vm)
+                        .unwrap();
 
                     match vm.run_code_obj(
                         rustpython::vm::builtins::PyCode::new(
@@ -713,14 +906,14 @@ impl VirtualMachine {
         // If op0 is set, this implies that we are going to set memory at op0_addr to that value.
         // Same for op1, dst.
         let dst_addr = self.run_context.borrow().compute_dst_addr(instruction);
-        let mut dst = self.validated_memory.get(&dst_addr, None);
+        let mut dst = self.validated_memory.lock().unwrap().get(&dst_addr, None);
         let op0_addr = self.run_context.borrow().compute_op0_addr(instruction);
-        let mut op0 = self.validated_memory.get(&op0_addr, None);
+        let mut op0 = self.validated_memory.lock().unwrap().get(&op0_addr, None);
         let op1_addr = self
             .run_context
             .borrow()
             .compute_op1_addr(instruction, op0.clone())?;
-        let mut op1 = self.validated_memory.get(&op1_addr, None);
+        let mut op1 = self.validated_memory.lock().unwrap().get(&op1_addr, None);
 
         // res throughout this function represents the computation on op0,op1
         // as defined in decode.py.
@@ -769,11 +962,11 @@ impl VirtualMachine {
         // and to get an informative error message if they were not computed.
         let op0 = match op0 {
             Some(op0) => op0,
-            None => self.validated_memory.borrow_mut().index(&op0_addr)?,
+            None => self.validated_memory.lock().unwrap().index(&op0_addr)?,
         };
         let op1 = match op1 {
             Some(op1) => op1,
-            None => self.validated_memory.borrow_mut().index(&op0_addr)?,
+            None => self.validated_memory.lock().unwrap().index(&op0_addr)?,
         };
 
         // Compute res if needed.
@@ -793,20 +986,26 @@ impl VirtualMachine {
         // Force pulling dst from memory for soundness.
         let dst = match dst {
             Some(dst) => dst,
-            None => self.validated_memory.borrow_mut().index(&dst_addr)?,
+            None => self.validated_memory.lock().unwrap().index(&dst_addr)?,
         };
 
         // Write updated values.
         if should_update_dst {
             self.validated_memory
+                .lock()
+                .unwrap()
                 .index_set(dst_addr.clone(), dst.clone());
         }
         if should_update_op0 {
             self.validated_memory
+                .lock()
+                .unwrap()
                 .index_set(op0_addr.clone(), op0.clone());
         }
         if should_update_op1 {
             self.validated_memory
+                .lock()
+                .unwrap()
                 .index_set(op1_addr.clone(), op1.clone());
         }
 
@@ -917,6 +1116,8 @@ impl VirtualMachine {
                             match (rule.inner)(self, addr, args) {
                                 Some(value) => self
                                     .validated_memory
+                                    .lock()
+                                    .unwrap()
                                     .index_set(addr.to_owned().into(), value.into()),
                                 None => continue,
                             }
@@ -934,9 +1135,12 @@ impl VirtualMachine {
     pub fn verify_auto_deductions(&mut self) -> Result<(), VirtualMachineError> {
         let addrs = self
             .validated_memory
+            .lock()
+            .unwrap()
             .memory
             .as_ref()
-            .borrow()
+            .lock()
+            .unwrap()
             .data
             .iter()
             .map(|(addr, _)| addr.to_owned())
@@ -950,8 +1154,11 @@ impl VirtualMachine {
                         for (rule, args) in rules.iter() {
                             match (rule.inner)(self, &addr, args) {
                                 Some(value) => {
-                                    let current =
-                                        self.validated_memory.index(&addr.clone().into())?;
+                                    let current = self
+                                        .validated_memory
+                                        .lock()
+                                        .unwrap()
+                                        .index(&addr.clone().into())?;
 
                                     // If the values are not the same, try using check_eq to
                                     // allow a subclass to override this result.

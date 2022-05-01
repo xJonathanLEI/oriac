@@ -1,16 +1,19 @@
-use crate::cairo::lang::{
-    compiler::program::Program,
-    instances::CairoLayout,
-    vm::{
-        builtin_runner::{BuiltinRunner, Error as BuiltinRunnerError},
-        memory_dict::{Error as MemoryDictError, MemoryDict},
-        memory_segments::{Error as MemorySegmentError, MemorySegmentManager},
-        output_builtin_runner::OutputBuiltinRunner,
-        relocatable::{MaybeRelocatable, RelocatableValue},
-        utils::RunResources,
-        vm_core::{RunContext, VirtualMachine, VirtualMachineError},
-        vm_exceptions::VmException,
+use crate::{
+    cairo::lang::{
+        compiler::program::Program,
+        instances::CairoLayout,
+        vm::{
+            builtin_runner::{BuiltinRunner, Error as BuiltinRunnerError},
+            memory_dict::{Error as MemoryDictError, MemoryDict},
+            memory_segments::{Error as MemorySegmentError, MemorySegmentManager},
+            output_builtin_runner::OutputBuiltinRunner,
+            relocatable::{MaybeRelocatable, RelocatableValue},
+            utils::RunResources,
+            vm_core::{RunContext, VirtualMachine, VirtualMachineError},
+            vm_exceptions::VmException,
+        },
     },
+    hint_support::HintLocals,
 };
 
 use num_bigint::BigInt;
@@ -18,6 +21,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::{Arc, Mutex},
 };
 
 pub type BuiltinRunnerMap = HashMap<String, Box<dyn BuiltinRunner>>;
@@ -32,8 +36,8 @@ pub struct CairoRunner {
     pub original_steps: Option<BigInt>,
     pub proof_mode: bool,
     pub allow_missing_builtins: bool,
-    pub memory: Rc<RefCell<MemoryDict>>,
-    pub segments: MemorySegmentManager,
+    pub memory: Arc<Mutex<MemoryDict>>,
+    pub segments: Arc<Mutex<MemorySegmentManager>>,
     pub segment_offsets: Option<HashMap<BigInt, BigInt>>,
     pub final_pc: Option<RelocatableValue>,
     /// Flag used to ensure a safe use.
@@ -192,7 +196,7 @@ impl CairoRunner {
             }
         }
 
-        let memory = Rc::new(RefCell::new(memory));
+        let memory = Arc::new(Mutex::new(memory));
 
         let segments = MemorySegmentManager::new(memory.clone(), program.prime().clone());
 
@@ -204,7 +208,7 @@ impl CairoRunner {
             proof_mode,
             allow_missing_builtins,
             memory,
-            segments,
+            segments: Arc::new(Mutex::new(segments)),
             segment_offsets: None,
             final_pc: None,
             run_ended: false,
@@ -222,14 +226,14 @@ impl CairoRunner {
 
     pub fn initialize_segments(&mut self) {
         // Program segment.
-        self.program_base = Some(self.segments.add(None));
+        self.program_base = Some(self.segments.lock().unwrap().add(None));
 
         // Execution segment.
-        self.execution_base = Some(self.segments.add(None));
+        self.execution_base = Some(self.segments.lock().unwrap().add(None));
 
         // Builtin segments.
         for builtin_runner in self.builtin_runners.borrow_mut().values_mut() {
-            builtin_runner.initialize_segments(&mut self.segments);
+            builtin_runner.initialize_segments(&mut self.segments.lock().unwrap());
         }
     }
 
@@ -281,7 +285,7 @@ impl CairoRunner {
             // ```
             todo!()
         } else {
-            let return_fp = self.segments.add(None);
+            let return_fp = self.segments.lock().unwrap().add(None);
 
             match self.program.main() {
                 Some(main) => self.initialize_function_entrypoint(&main, stack, return_fp.into()),
@@ -296,7 +300,7 @@ impl CairoRunner {
         args: Vec<MaybeRelocatable>,
         return_fp: MaybeRelocatable,
     ) -> Result<RelocatableValue, Error> {
-        let end = self.segments.add(None);
+        let end = self.segments.lock().unwrap().add(None);
         let mut stack = args;
         stack.push(return_fp);
         stack.push(end.clone().into());
@@ -336,10 +340,11 @@ impl CairoRunner {
         Ok(())
     }
 
+    #[allow(unused)]
     pub fn initialize_vm(
         &mut self,
         hint_locals: HashMap<String, ()>,
-        static_locals: Option<HashMap<String, ()>>,
+        static_locals: (),
     ) -> Result<(), Error> {
         let context = RunContext::new(
             self.memory.clone(),
@@ -349,13 +354,15 @@ impl CairoRunner {
             self.program.prime().clone(),
         );
 
-        let static_locals = static_locals.unwrap_or_default();
+        let static_locals = HintLocals {
+            segments: self.segments.clone(),
+        };
 
         self.vm = Some(VirtualMachine::new(
             self.program.clone(),
             Rc::new(RefCell::new(context)),
             hint_locals,
-            Some(static_locals),
+            static_locals,
             Some(self.builtin_runners.clone()),
             Some(self.program_base()?.to_owned().into()),
         ));
@@ -417,7 +424,7 @@ impl CairoRunner {
         }
 
         self.accessed_addresses = {
-            let mut vm_memory = self.memory.borrow_mut();
+            let mut vm_memory = self.memory.lock().unwrap();
             Some(
                 self.vm()?
                     .accessed_addresses
@@ -431,7 +438,7 @@ impl CairoRunner {
                     .collect::<HashSet<_>>(),
             )
         };
-        self.memory.borrow_mut().relocate_memory()?;
+        self.memory.lock().unwrap().relocate_memory()?;
         self.vm_mut()?.end_run()?;
 
         if disable_finalize_all {
@@ -440,9 +447,12 @@ impl CairoRunner {
         }
 
         // Freeze to enable caching; No changes in memory should be made from now on.
-        self.memory.borrow_mut().freeze();
+        self.memory.lock().unwrap().freeze();
         // Deduce the size of each segment from its usage.
-        self.segments.compute_effective_sizes(false)?;
+        self.segments
+            .lock()
+            .unwrap()
+            .compute_effective_sizes(false)?;
 
         if self.proof_mode && !disable_trace_padding {
             // TODO: implement the following Python code
@@ -484,7 +494,7 @@ impl CairoRunner {
                         return Err(Error::MissingBuiltin);
                     }
                     pointer = pointer - &BigInt::from(1u32).into();
-                    if self.memory.borrow_mut().index(&pointer)?
+                    if self.memory.lock().unwrap().index(&pointer)?
                         != MaybeRelocatable::Int(BigInt::from(0u32))
                     {
                         return Err(Error::NonZeroMissingBuiltinStopPointer {
@@ -517,7 +527,7 @@ impl CairoRunner {
         ptr: MaybeRelocatable,
         data: &[MaybeRelocatable],
     ) -> MaybeRelocatable {
-        self.segments.load_data(ptr, data)
+        self.segments.lock().unwrap().load_data(ptr, data)
     }
 
     // TODO: implement `output_callback`
@@ -533,7 +543,7 @@ impl CairoRunner {
             let (_, size) = output_runner.get_used_cells_and_allocated_size(self)?;
             let mut i = BigInt::from(0u32);
             while i < size {
-                match self.memory.borrow_mut().get(
+                match self.memory.lock().unwrap().get(
                     &(output_runner
                         .base
                         .clone()
@@ -667,7 +677,7 @@ mod tests {
         runner.initialize_segments();
         let end = runner.initialize_main_entrypoint().unwrap();
 
-        runner.initialize_vm(HashMap::new(), None).unwrap();
+        runner.initialize_vm(HashMap::new(), ()).unwrap();
 
         runner.run_until_pc(end.into(), None).unwrap();
 
@@ -695,7 +705,7 @@ mod tests {
         runner.initialize_segments();
         let end = runner.initialize_main_entrypoint().unwrap();
 
-        runner.initialize_vm(HashMap::new(), None).unwrap();
+        runner.initialize_vm(HashMap::new(), ()).unwrap();
 
         runner.run_until_pc(end.into(), None).unwrap();
 

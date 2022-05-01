@@ -2,4 +2,6 @@
 
 pub mod cairo;
 
+pub mod hint_support;
+
 pub mod serde;
