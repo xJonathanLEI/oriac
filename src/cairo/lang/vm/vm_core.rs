@@ -16,7 +16,7 @@ use crate::cairo::lang::{
 };
 
 use num_bigint::BigInt;
-use rustpython::vm::PyPayload;
+use rustpython::vm::{Interpreter, PyPayload};
 use std::{
     borrow::BorrowMut,
     cell::RefCell,
@@ -56,7 +56,6 @@ pub enum RunContextError {
     UnknownOp0,
 }
 
-#[derive(Debug)]
 pub struct VirtualMachine {
     // //////////
     // START: Fields from `VirtualMachineBase` in Python
@@ -90,6 +89,7 @@ pub struct VirtualMachine {
     pub trace: Vec<TraceEntry<MaybeRelocatable>>,
     /// Current step.
     pub current_step: BigInt,
+    pub python_interpreter: Interpreter,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -297,6 +297,7 @@ impl VirtualMachine {
             accessed_addresses,
             trace: vec![],
             current_step: BigInt::from(0),
+            python_interpreter: Interpreter::default(),
         };
 
         vm.enter_scope(Some(hint_locals));
@@ -379,7 +380,7 @@ impl VirtualMachine {
                 // ```
 
                 // This will almost always fail as globals injection has not been implemented
-                rustpython::vm::Interpreter::default().enter(|vm| {
+                self.python_interpreter.enter(|vm| {
                     let scope = vm.new_scope_with_builtins();
 
                     match vm.run_code_obj(
@@ -985,6 +986,32 @@ impl VirtualMachine {
         }
 
         Ok(())
+    }
+}
+
+impl Debug for VirtualMachine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VirtualMachine")
+            .field("prime", &self.prime)
+            .field("builtin_runners", &self.builtin_runners)
+            .field("exec_scopes", &self.exec_scopes)
+            .field("hints", &self.hints)
+            .field("hint_pc_and_index", &self.hint_pc_and_index)
+            .field("instruction_debug_info", &self.instruction_debug_info)
+            .field("debug_file_contents", &self.debug_file_contents)
+            .field("error_message_attributes", &self.error_message_attributes)
+            .field("program", &self.program)
+            .field("validated_memory", &self.validated_memory)
+            .field("auto_deduction", &self.auto_deduction)
+            .field(
+                "skip_instruction_execution",
+                &self.skip_instruction_execution,
+            )
+            .field("run_context", &self.run_context)
+            .field("accessed_addresses", &self.accessed_addresses)
+            .field("trace", &self.trace)
+            .field("current_step", &self.current_step)
+            .finish()
     }
 }
 
