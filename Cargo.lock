@@ -1075,6 +1075,7 @@ dependencies = [
  "criterion",
  "hex",
  "num-bigint",
+ "once_cell",
  "rustpython",
  "serde",
  "serde_json",

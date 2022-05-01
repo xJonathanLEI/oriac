@@ -13,6 +13,7 @@ A toy Cairo VM implementation in Rust
 clap = { version = "3.1.0", features = ["derive"] }
 hex = "0.4.3"
 num-bigint = "0.4.3"
+once_cell = "1.10.0"
 rustpython = { git = "https://github.com/RustPython/RustPython" }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.78"

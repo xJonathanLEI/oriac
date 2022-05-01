@@ -16,6 +16,7 @@ use crate::cairo::lang::{
 };
 
 use num_bigint::BigInt;
+use once_cell::unsync::OnceCell;
 use rustpython::vm::{Interpreter, PyPayload};
 use std::{
     borrow::BorrowMut,
@@ -89,7 +90,7 @@ pub struct VirtualMachine {
     pub trace: Vec<TraceEntry<MaybeRelocatable>>,
     /// Current step.
     pub current_step: BigInt,
-    pub python_interpreter: Interpreter,
+    pub python_interpreter: OnceCell<Interpreter>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -297,7 +298,7 @@ impl VirtualMachine {
             accessed_addresses,
             trace: vec![],
             current_step: BigInt::from(0),
-            python_interpreter: Interpreter::default(),
+            python_interpreter: OnceCell::new(),
         };
 
         vm.enter_scope(Some(hint_locals));
@@ -380,29 +381,31 @@ impl VirtualMachine {
                 // ```
 
                 // This will almost always fail as globals injection has not been implemented
-                self.python_interpreter.enter(|vm| {
-                    let scope = vm.new_scope_with_builtins();
+                self.python_interpreter
+                    .get_or_init(Interpreter::default)
+                    .enter(|vm| {
+                        let scope = vm.new_scope_with_builtins();
 
-                    match vm.run_code_obj(
-                        rustpython::vm::builtins::PyCode::new(
-                            vm.map_codeobj(hint.compiled.clone()),
-                        )
-                        .into_ref(vm),
-                        scope,
-                    ) {
-                        Ok(value) => Ok(value),
-                        Err(err) => {
-                            // unwrap() here should be safe
-                            let mut err_str = String::new();
-                            vm.write_exception(&mut err_str, &err).unwrap();
+                        match vm.run_code_obj(
+                            rustpython::vm::builtins::PyCode::new(
+                                vm.map_codeobj(hint.compiled.clone()),
+                            )
+                            .into_ref(vm),
+                            scope,
+                        ) {
+                            Ok(value) => Ok(value),
+                            Err(err) => {
+                                // unwrap() here should be safe
+                                let mut err_str = String::new();
+                                vm.write_exception(&mut err_str, &err).unwrap();
 
-                            Err(VirtualMachineError::HintExecuteError {
-                                hint_index,
-                                exception: err_str,
-                            })
+                                Err(VirtualMachineError::HintExecuteError {
+                                    hint_index,
+                                    exception: err_str,
+                                })
+                            }
                         }
-                    }
-                })?;
+                    })?;
 
                 // TODO: implement the following Python code
                 //
