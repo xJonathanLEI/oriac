@@ -59,10 +59,10 @@ fn main() -> Result<(), Error> {
     )
     .unwrap();
 
-    runner.initialize_segments();
+    runner.initialize_segments().unwrap();
     let end = runner.initialize_main_entrypoint().unwrap();
 
-    runner.initialize_vm(HashMap::new(), None).unwrap();
+    runner.initialize_vm(HashMap::new(), ()).unwrap();
 
     runner.run_until_pc(end.into(), None).unwrap();
 

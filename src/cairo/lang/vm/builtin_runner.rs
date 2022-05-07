@@ -6,7 +6,10 @@ use crate::cairo::lang::vm::{
 };
 
 use num_bigint::BigInt;
-use std::any::Any;
+use std::{
+    any::Any,
+    sync::{MutexGuard, PoisonError},
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -22,11 +25,13 @@ pub enum Error {
         expected: RelocatableValue,
         found: RelocatableValue,
     },
+    #[error("Unable to lock mutex")]
+    MutexLockError,
 }
 
 pub trait BuiltinRunner: std::fmt::Debug {
     /// Adds memory segments for the builtin.
-    fn initialize_segments(&mut self, segments: &mut MemorySegmentManager);
+    fn initialize_segments(&mut self, segments: &mut MutexGuard<MemorySegmentManager>);
 
     /// Returns the initial stack elements enforced by this builtin.
     fn initial_stack(&self) -> Vec<MaybeRelocatable>;
@@ -62,5 +67,11 @@ impl From<MemoryError> for Error {
 impl From<MemorySegmentError> for Error {
     fn from(value: MemorySegmentError) -> Self {
         Self::MemorySegmentError(value)
+    }
+}
+
+impl<T> From<PoisonError<T>> for Error {
+    fn from(_: PoisonError<T>) -> Self {
+        Self::MutexLockError
     }
 }

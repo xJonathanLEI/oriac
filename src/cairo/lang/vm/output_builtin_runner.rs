@@ -6,7 +6,7 @@ use crate::cairo::lang::vm::{
 };
 
 use num_bigint::BigInt;
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::MutexGuard};
 
 #[derive(Debug)]
 pub struct PublicMemoryPage {
@@ -39,7 +39,7 @@ impl OutputBuiltinRunner {
 }
 
 impl BuiltinRunner for OutputBuiltinRunner {
-    fn initialize_segments(&mut self, segments: &mut MemorySegmentManager) {
+    fn initialize_segments(&mut self, segments: &mut MutexGuard<MemorySegmentManager>) {
         self.base = Some(segments.add(None));
         self.stop_ptr = None;
     }
@@ -64,7 +64,7 @@ impl BuiltinRunner for OutputBuiltinRunner {
             let stop_ptr = {
                 // We're forcing the conversion to `RelocatableValue` as the Python code seems to
                 // assume it's always the case.
-                match runner.memory.borrow_mut().index(&pointer_minus_one)? {
+                match runner.memory.lock()?.index(&pointer_minus_one)? {
                     MaybeRelocatable::RelocatableValue(value) => value,
                     MaybeRelocatable::Int(_) => panic!("expecting RelocatableValue"),
                 }
@@ -95,7 +95,7 @@ impl BuiltinRunner for OutputBuiltinRunner {
     }
 
     fn get_used_cells(&self, runner: &CairoRunner) -> Result<BigInt, BuiltinRunnerError> {
-        let size = runner.segments.get_segment_used_size(
+        let size = runner.segments.lock()?.get_segment_used_size(
             self.base
                 .clone()
                 .ok_or(BuiltinRunnerError::UnexpectedNoneValue)?
