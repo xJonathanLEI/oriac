@@ -1,4 +1,4 @@
-use rustpython::vm::bytecode::CodeObject;
+use rustpython_vm::bytecode::CodeObject;
 
 #[derive(Debug)]
 pub struct CompiledHint {

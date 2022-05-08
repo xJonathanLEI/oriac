@@ -23,7 +23,7 @@ use crate::{
 
 use num_bigint::BigInt;
 use once_cell::unsync::OnceCell;
-use rustpython::vm::{Interpreter, PyObjectRef, PyPayload};
+use rustpython_vm::{Interpreter, PyObjectRef, PyPayload};
 use std::{
     borrow::BorrowMut,
     cell::RefCell,
@@ -153,7 +153,7 @@ pub enum VirtualMachineError {
         return_fp: MaybeRelocatable,
     },
     #[error(transparent)]
-    HintCompileError(rustpython::vm::compile::CompileError),
+    HintCompileError(rustpython_vm::compile::CompileError),
     #[error("Got an exception while executing a hint ({hint_index}): {exception}")]
     HintExecuteError {
         hint_index: usize,
@@ -431,7 +431,7 @@ impl VirtualMachine {
                         }
 
                         match vm.run_code_obj(
-                            rustpython::vm::builtins::PyCode::new(
+                            rustpython_vm::builtins::PyCode::new(
                                 vm.map_codeobj(hint.compiled.clone()),
                             )
                             .into_ref(vm),
@@ -492,11 +492,11 @@ impl VirtualMachine {
                     ),
                 );
                 compiled_hints.push(CompiledHint {
-                    compiled: rustpython::vm::compile::compile(
+                    compiled: rustpython_vm::compile::compile(
                         &hint.code,
-                        rustpython::vm::compile::Mode::Exec,
+                        rustpython_vm::compile::Mode::Exec,
                         format!("<hint{}>", hint_id),
-                        rustpython::vm::compile::CompileOpts::default(),
+                        rustpython_vm::compile::CompileOpts::default(),
                     )?,
                     consts: (),
                 });
@@ -1088,8 +1088,8 @@ impl From<PureValueError> for VirtualMachineError {
     }
 }
 
-impl From<rustpython::vm::compile::CompileError> for VirtualMachineError {
-    fn from(value: rustpython::vm::compile::CompileError) -> Self {
+impl From<rustpython_vm::compile::CompileError> for VirtualMachineError {
+    fn from(value: rustpython_vm::compile::CompileError) -> Self {
         VirtualMachineError::HintCompileError(value)
     }
 }
