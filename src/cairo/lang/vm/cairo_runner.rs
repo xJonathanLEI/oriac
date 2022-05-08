@@ -21,7 +21,6 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
-    sync::{Arc, Mutex, PoisonError},
 };
 
 pub type BuiltinRunnerMap = HashMap<String, Box<dyn BuiltinRunner>>;
@@ -36,8 +35,8 @@ pub struct CairoRunner {
     pub original_steps: Option<BigInt>,
     pub proof_mode: bool,
     pub allow_missing_builtins: bool,
-    pub memory: Arc<Mutex<MemoryDict>>,
-    pub segments: Arc<Mutex<MemorySegmentManager>>,
+    pub memory: Rc<RefCell<MemoryDict>>,
+    pub segments: Rc<RefCell<MemorySegmentManager>>,
     pub segment_offsets: Option<HashMap<BigInt, BigInt>>,
     pub final_pc: Option<RelocatableValue>,
     /// Flag used to ensure a safe use.
@@ -104,8 +103,6 @@ pub enum Error {
     UnexpectedBuiltinType,
     #[error("Unexpected None value")]
     UnexpectedNoneValue,
-    #[error("Unable to lock mutex")]
-    MutexLockError,
 }
 
 impl CairoRunner {
@@ -198,9 +195,9 @@ impl CairoRunner {
             }
         }
 
-        let memory = Arc::new(Mutex::new(memory));
+        let memory = Rc::new(RefCell::new(memory));
 
-        let segments = Arc::new(Mutex::new(MemorySegmentManager::new(
+        let segments = Rc::new(RefCell::new(MemorySegmentManager::new(
             memory.clone(),
             program.prime().clone(),
         )));
@@ -229,19 +226,17 @@ impl CairoRunner {
         })
     }
 
-    pub fn initialize_segments(&mut self) -> Result<(), Error> {
+    pub fn initialize_segments(&mut self) {
         // Program segment.
-        self.program_base = Some(self.segments.lock()?.add(None));
+        self.program_base = Some(self.segments.borrow_mut().add(None));
 
         // Execution segment.
-        self.execution_base = Some(self.segments.lock()?.add(None));
+        self.execution_base = Some(self.segments.borrow_mut().add(None));
 
         // Builtin segments.
         for builtin_runner in self.builtin_runners.borrow_mut().values_mut() {
-            builtin_runner.initialize_segments(&mut self.segments.lock()?);
+            builtin_runner.initialize_segments(&mut self.segments.borrow_mut());
         }
-
-        Ok(())
     }
 
     /// Initializes state for running a program from the main() entrypoint. If self.proof_mode ==
@@ -292,7 +287,7 @@ impl CairoRunner {
             // ```
             todo!()
         } else {
-            let return_fp = self.segments.lock()?.add(None);
+            let return_fp = self.segments.borrow_mut().add(None);
 
             match self.program.main() {
                 Some(main) => self.initialize_function_entrypoint(&main, stack, return_fp.into()),
@@ -307,7 +302,7 @@ impl CairoRunner {
         args: Vec<MaybeRelocatable>,
         return_fp: MaybeRelocatable,
     ) -> Result<RelocatableValue, Error> {
-        let end = self.segments.lock()?.add(None);
+        let end = self.segments.borrow_mut().add(None);
         let mut stack = args;
         stack.push(return_fp);
         stack.push(end.clone().into());
@@ -336,13 +331,13 @@ impl CairoRunner {
                 .iter()
                 .map(|item| item.to_owned().into())
                 .collect::<Vec<_>>(),
-        )?;
+        );
 
         // Load stack.
         self.load_data(
             self.execution_base()?.to_owned().into(),
             &stack.iter().map(|item| item.to_owned()).collect::<Vec<_>>(),
-        )?;
+        );
 
         Ok(())
     }
@@ -428,7 +423,7 @@ impl CairoRunner {
         }
 
         self.accessed_addresses = {
-            let mut vm_memory = self.memory.lock()?;
+            let mut vm_memory = self.memory.borrow_mut();
             Some(
                 self.vm()?
                     .accessed_addresses
@@ -442,7 +437,7 @@ impl CairoRunner {
                     .collect::<HashSet<_>>(),
             )
         };
-        self.memory.lock()?.relocate_memory()?;
+        self.memory.borrow_mut().relocate_memory()?;
         self.vm_mut()?.end_run()?;
 
         if disable_finalize_all {
@@ -451,9 +446,9 @@ impl CairoRunner {
         }
 
         // Freeze to enable caching; No changes in memory should be made from now on.
-        self.memory.lock()?.freeze();
+        self.memory.borrow_mut().freeze();
         // Deduce the size of each segment from its usage.
-        self.segments.lock()?.compute_effective_sizes(false)?;
+        self.segments.borrow_mut().compute_effective_sizes(false)?;
 
         if self.proof_mode && !disable_trace_padding {
             // TODO: implement the following Python code
@@ -495,7 +490,7 @@ impl CairoRunner {
                         return Err(Error::MissingBuiltin);
                     }
                     pointer = pointer - &BigInt::from(1u32).into();
-                    if self.memory.lock()?.index(&pointer)?
+                    if self.memory.borrow_mut().index(&pointer)?
                         != MaybeRelocatable::Int(BigInt::from(0u32))
                     {
                         return Err(Error::NonZeroMissingBuiltinStopPointer {
@@ -527,8 +522,8 @@ impl CairoRunner {
         &mut self,
         ptr: MaybeRelocatable,
         data: &[MaybeRelocatable],
-    ) -> Result<MaybeRelocatable, Error> {
-        Ok(self.segments.lock()?.load_data(ptr, data)?)
+    ) -> MaybeRelocatable {
+        self.segments.borrow_mut().load_data(ptr, data)
     }
 
     // TODO: implement `output_callback`
@@ -544,7 +539,7 @@ impl CairoRunner {
             let (_, size) = output_runner.get_used_cells_and_allocated_size(self)?;
             let mut i = BigInt::from(0u32);
             while i < size {
-                match self.memory.lock()?.get(
+                match self.memory.borrow_mut().get(
                     &(output_runner
                         .base
                         .clone()
@@ -633,12 +628,6 @@ impl From<BuiltinRunnerError> for Error {
     }
 }
 
-impl<T> From<PoisonError<T>> for Error {
-    fn from(_: PoisonError<T>) -> Self {
-        Self::MutexLockError
-    }
-}
-
 fn output_builtin_factory(_name: &str, included: bool) -> Box<dyn BuiltinRunner> {
     Box::new(OutputBuiltinRunner::new(included))
 }
@@ -681,7 +670,7 @@ mod tests {
         )
         .unwrap();
 
-        runner.initialize_segments().unwrap();
+        runner.initialize_segments();
         let end = runner.initialize_main_entrypoint().unwrap();
 
         runner.initialize_vm(HashMap::new(), ()).unwrap();
@@ -709,7 +698,7 @@ mod tests {
         )
         .unwrap();
 
-        runner.initialize_segments().unwrap();
+        runner.initialize_segments();
         let end = runner.initialize_main_entrypoint().unwrap();
 
         runner.initialize_vm(HashMap::new(), ()).unwrap();

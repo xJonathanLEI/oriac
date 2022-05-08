@@ -12,7 +12,6 @@ use crate::{
             memory_dict::{Error as MemoryDictError, MemoryDict},
             relocatable::{MaybeRelocatable, RelocatableValue},
             trace_entry::TraceEntry,
-            validated_memory_dict::Error as ValidatedMemoryDictError,
             validated_memory_dict::ValidatedMemoryDict,
             virtual_machine_base::CompiledHint,
             vm_exceptions::PureValueError,
@@ -30,7 +29,6 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
     rc::Rc,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 pub struct Rule {
@@ -49,7 +47,7 @@ pub struct Operands {
 /// Contains a complete state of the virtual machine. This includes registers and memory.
 #[derive(Debug, Clone)]
 pub struct RunContext {
-    pub memory: Arc<Mutex<MemoryDict>>,
+    pub memory: Rc<RefCell<MemoryDict>>,
     pub pc: MaybeRelocatable,
     pub ap: MaybeRelocatable,
     pub fp: MaybeRelocatable,
@@ -108,8 +106,6 @@ pub enum VirtualMachineError {
     #[error(transparent)]
     MemoryDictError(MemoryDictError),
     #[error(transparent)]
-    ValidatedMemoryDictError(ValidatedMemoryDictError),
-    #[error(transparent)]
     PureValueError(PureValueError),
     #[error("Res.UNCONSTRAINED cannot be used with Opcode.ASSERT_EQ")]
     AssertEqWithUnconstrained,
@@ -159,8 +155,6 @@ pub enum VirtualMachineError {
         hint_index: usize,
         exception: String,
     },
-    #[error("Unable to lock mutex")]
-    MutexLockError,
 }
 
 impl Debug for Rule {
@@ -171,7 +165,7 @@ impl Debug for Rule {
 
 impl RunContext {
     pub fn new(
-        memory: Arc<Mutex<MemoryDict>>,
+        memory: Rc<RefCell<MemoryDict>>,
         pc: MaybeRelocatable,
         ap: MaybeRelocatable,
         fp: MaybeRelocatable,
@@ -188,10 +182,8 @@ impl RunContext {
 
     /// Returns the encoded instruction (the value at pc) and the immediate value (the value at pc +
     /// 1, if it exists in the memory).
-    pub fn get_instruction_encoding(
-        &mut self,
-    ) -> Result<(BigInt, Option<BigInt>), PoisonError<MutexGuard<MemoryDict>>> {
-        let mut memory = self.memory.lock()?;
+    pub fn get_instruction_encoding(&mut self) -> (BigInt, Option<BigInt>) {
+        let mut memory = self.memory.as_ref().borrow_mut();
 
         // TODO: check if it's safe to call unwrap here (probably not, change to proper error
         //       handling)
@@ -212,7 +204,7 @@ impl RunContext {
             None => None,
         };
 
-        Ok((instruction_encoding, optional_imm))
+        (instruction_encoding, optional_imm)
     }
 
     pub fn compute_dst_addr(&self, instruction: &Instruction) -> MaybeRelocatable {
@@ -417,7 +409,7 @@ impl VirtualMachine {
                                     "add",
                                     memory_segment_manager_cls.clone(),
                                     move |_self: PyObjectRef| {
-                                        ctx_segments.lock().unwrap().add(None);
+                                        ctx_segments.as_ref().borrow_mut().add(None);
                                     },
                                 ),
                             );
@@ -467,7 +459,7 @@ impl VirtualMachine {
         }
 
         // Decode.
-        let instruction = self.decode_current_instruction()?;
+        let instruction = self.decode_current_instruction();
 
         // Run.
         self.run_instruction(&instruction)
@@ -761,14 +753,14 @@ impl VirtualMachine {
         // If op0 is set, this implies that we are going to set memory at op0_addr to that value.
         // Same for op1, dst.
         let dst_addr = self.run_context.borrow().compute_dst_addr(instruction);
-        let mut dst = self.validated_memory.get(&dst_addr, None)?;
+        let mut dst = self.validated_memory.get(&dst_addr, None);
         let op0_addr = self.run_context.borrow().compute_op0_addr(instruction);
-        let mut op0 = self.validated_memory.get(&op0_addr, None)?;
+        let mut op0 = self.validated_memory.get(&op0_addr, None);
         let op1_addr = self
             .run_context
             .borrow()
             .compute_op1_addr(instruction, op0.clone())?;
-        let mut op1 = self.validated_memory.get(&op1_addr, None)?;
+        let mut op1 = self.validated_memory.get(&op1_addr, None);
 
         // res throughout this function represents the computation on op0,op1
         // as defined in decode.py.
@@ -783,10 +775,10 @@ impl VirtualMachine {
         // Note: This may fail to deduce if 2 auto deduction rules are needed to be used in
         // a different order.
         if matches!(op0, None) {
-            op0 = self.deduce_memory_cell(&op0_addr)?;
+            op0 = self.deduce_memory_cell(&op0_addr);
         }
         if matches!(op1, None) {
-            op1 = self.deduce_memory_cell(&op1_addr)?;
+            op1 = self.deduce_memory_cell(&op1_addr);
         }
 
         let should_update_dst = dst.is_none();
@@ -847,15 +839,15 @@ impl VirtualMachine {
         // Write updated values.
         if should_update_dst {
             self.validated_memory
-                .index_set(dst_addr.clone(), dst.clone())?;
+                .index_set(dst_addr.clone(), dst.clone());
         }
         if should_update_op0 {
             self.validated_memory
-                .index_set(op0_addr.clone(), op0.clone())?;
+                .index_set(op0_addr.clone(), op0.clone());
         }
         if should_update_op1 {
             self.validated_memory
-                .index_set(op1_addr.clone(), op1.clone())?;
+                .index_set(op1_addr.clone(), op1.clone());
         }
 
         Ok((
@@ -865,16 +857,16 @@ impl VirtualMachine {
     }
 
     #[allow(clippy::let_and_return)] // Doing this on purpose to mimic Python code
-    pub fn decode_current_instruction(&self) -> Result<Instruction, VirtualMachineError> {
+    pub fn decode_current_instruction(&self) -> Instruction {
         let (instruction_encoding, imm) = self
             .run_context
             .as_ref()
             .borrow_mut()
-            .get_instruction_encoding()?;
+            .get_instruction_encoding();
 
         let instruction = decode_instruction(instruction_encoding, imm);
 
-        Ok(instruction)
+        instruction
     }
 
     pub fn opcode_assertions(
@@ -955,11 +947,8 @@ impl VirtualMachine {
     /// Tries to deduce the value of memory\[addr\] if it was not already computed.
     ///
     /// Returns the value if deduced, otherwise returns None.
-    pub fn deduce_memory_cell(
-        &mut self,
-        addr: &MaybeRelocatable,
-    ) -> Result<Option<MaybeRelocatable>, VirtualMachineError> {
-        Ok(match addr {
+    pub fn deduce_memory_cell(&mut self, addr: &MaybeRelocatable) -> Option<MaybeRelocatable> {
+        match addr {
             MaybeRelocatable::Int(_) => None,
             MaybeRelocatable::RelocatableValue(addr) => {
                 match self.auto_deduction.get(&addr.segment_index) {
@@ -968,7 +957,7 @@ impl VirtualMachine {
                             match (rule.inner)(self, addr, args) {
                                 Some(value) => self
                                     .validated_memory
-                                    .index_set(addr.to_owned().into(), value.into())?,
+                                    .index_set(addr.to_owned().into(), value.into()),
                                 None => continue,
                             }
                         }
@@ -977,7 +966,7 @@ impl VirtualMachine {
                     None => None,
                 }
             }
-        })
+        }
     }
 
     /// Makes sure that all assigned memory cells are consistent with their auto deduction rules.
@@ -986,7 +975,8 @@ impl VirtualMachine {
         let addrs = self
             .validated_memory
             .memory
-            .lock()?
+            .as_ref()
+            .borrow()
             .data
             .iter()
             .map(|(addr, _)| addr.to_owned())
@@ -1076,12 +1066,6 @@ impl From<MemoryDictError> for VirtualMachineError {
     }
 }
 
-impl From<ValidatedMemoryDictError> for VirtualMachineError {
-    fn from(value: ValidatedMemoryDictError) -> Self {
-        VirtualMachineError::ValidatedMemoryDictError(value)
-    }
-}
-
 impl From<PureValueError> for VirtualMachineError {
     fn from(value: PureValueError) -> Self {
         VirtualMachineError::PureValueError(value)
@@ -1091,12 +1075,6 @@ impl From<PureValueError> for VirtualMachineError {
 impl From<rustpython_vm::compile::CompileError> for VirtualMachineError {
     fn from(value: rustpython_vm::compile::CompileError) -> Self {
         VirtualMachineError::HintCompileError(value)
-    }
-}
-
-impl<T> From<PoisonError<T>> for VirtualMachineError {
-    fn from(_: PoisonError<T>) -> Self {
-        Self::MutexLockError
     }
 }
 

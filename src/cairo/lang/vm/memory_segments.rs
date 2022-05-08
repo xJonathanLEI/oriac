@@ -5,15 +5,12 @@ use crate::cairo::lang::vm::{
 };
 
 use num_bigint::BigInt;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, PoisonError},
-};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 /// Manages the list of memory segments, and allows relocating them once their sizes are known.
 #[derive(Debug)]
 pub struct MemorySegmentManager {
-    pub memory: Arc<Mutex<MemoryDict>>,
+    pub memory: Rc<RefCell<MemoryDict>>,
     pub prime: BigInt,
     /// Number of segments.
     pub n_segments: BigInt,
@@ -37,12 +34,10 @@ pub enum Error {
     ComputeEffectiveSizesNotCalled,
     #[error("memory segment not found")]
     SegmentNotFound,
-    #[error("Unable to lock mutex")]
-    MutexLockError,
 }
 
 impl MemorySegmentManager {
-    pub fn new(memory: Arc<Mutex<MemoryDict>>, prime: BigInt) -> Self {
+    pub fn new(memory: Rc<RefCell<MemoryDict>>, prime: BigInt) -> Self {
         Self {
             memory,
             prime,
@@ -93,7 +88,7 @@ impl MemorySegmentManager {
             return Ok(());
         }
 
-        if !self.memory.lock()?.is_frozen() {
+        if !self.memory.borrow().is_frozen() {
             return Err(Error::MemoryNotFrozen);
         }
 
@@ -111,7 +106,7 @@ impl MemorySegmentManager {
                 index += BigInt::from(1u32);
             }
 
-            for (addr, _) in self.memory.lock()?.data.iter() {
+            for (addr, _) in self.memory.borrow().data.iter() {
                 match addr {
                     MaybeRelocatable::Int(_) => return Err(Error::SecurityError(SecurityError {})),
                     MaybeRelocatable::RelocatableValue(addr) => {
@@ -140,13 +135,13 @@ impl MemorySegmentManager {
         &mut self,
         ptr: MaybeRelocatable,
         data: &[MaybeRelocatable],
-    ) -> Result<MaybeRelocatable, Error> {
+    ) -> MaybeRelocatable {
         for (i, v) in data.iter().enumerate() {
             self.memory
-                .lock()?
+                .borrow_mut()
                 .index_set(ptr.clone() + &BigInt::from(i), v.to_owned());
         }
-        Ok(ptr + &BigInt::from(data.len()))
+        ptr + &BigInt::from(data.len())
     }
 
     pub fn get_segment_used_size(&self, segment_index: BigInt) -> Result<BigInt, Error> {
@@ -157,11 +152,5 @@ impl MemorySegmentManager {
                 .to_owned()),
             None => Err(Error::ComputeEffectiveSizesNotCalled),
         }
-    }
-}
-
-impl<T> From<PoisonError<T>> for Error {
-    fn from(_: PoisonError<T>) -> Self {
-        Self::MutexLockError
     }
 }

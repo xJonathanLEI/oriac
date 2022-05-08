@@ -1,8 +1,8 @@
 use crate::cairo::lang::vm::memory_segments::MemorySegmentManager;
 
-use std::sync::{Arc, Mutex};
+use std::{cell::RefCell, rc::Rc};
 
 #[derive(Debug)]
 pub struct StaticLocals {
-    pub segments: Arc<Mutex<MemorySegmentManager>>,
+    pub segments: Rc<RefCell<MemorySegmentManager>>,
 }

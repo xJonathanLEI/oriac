@@ -5,13 +5,14 @@ use crate::cairo::lang::vm::{
 
 use num_bigint::BigInt;
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     fmt::Debug,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    rc::Rc,
 };
 
 pub struct ValidationRule {
-    pub inner: fn(&MutexGuard<MemoryDict>, &RelocatableValue, &()) -> HashSet<RelocatableValue>,
+    pub inner: fn(&MemoryDict, &RelocatableValue, &()) -> HashSet<RelocatableValue>,
 }
 
 /// A proxy to MemoryDict which validates memory values in specific segments upon writing to it.
@@ -19,21 +20,13 @@ pub struct ValidationRule {
 /// Validation is done according to the validation rules.
 #[derive(Debug)]
 pub struct ValidatedMemoryDict {
-    pub memory: Arc<Mutex<MemoryDict>>,
+    pub memory: Rc<RefCell<MemoryDict>>,
     /// validation_rules contains a mapping from a segment index to a list of functions (and a tuple
     /// of additional arguments) that may try to validate the value of memory cells in the segment
     /// (sometimes based on other memory cells).
     pub validation_rules: HashMap<BigInt, Vec<(ValidationRule, ())>>,
     /// A list of addresses which were already validated.
     pub validated_addresses: HashSet<RelocatableValue>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error(transparent)]
-    MemoryDictError(MemoryDictError),
-    #[error("Unable to lock mutex")]
-    MutexLockError,
 }
 
 impl Debug for ValidationRule {
@@ -43,7 +36,7 @@ impl Debug for ValidationRule {
 }
 
 impl ValidatedMemoryDict {
-    pub fn new(memory: Arc<Mutex<MemoryDict>>) -> Self {
+    pub fn new(memory: Rc<RefCell<MemoryDict>>) -> Self {
         Self {
             memory,
             validation_rules: HashMap::new(),
@@ -55,35 +48,28 @@ impl ValidatedMemoryDict {
         &mut self,
         addr: &MaybeRelocatable,
         default_value: Option<MaybeRelocatable>,
-    ) -> Result<Option<MaybeRelocatable>, Error> {
-        Ok(self.memory.lock()?.get(addr, default_value))
+    ) -> Option<MaybeRelocatable> {
+        self.memory.borrow_mut().get(addr, default_value)
     }
 
-    pub fn index(&mut self, addr: &MaybeRelocatable) -> Result<MaybeRelocatable, Error> {
-        Ok(self.memory.lock()?.index(addr)?)
+    pub fn index(&mut self, addr: &MaybeRelocatable) -> Result<MaybeRelocatable, MemoryDictError> {
+        self.memory.borrow_mut().index(addr)
     }
 
-    pub fn index_set(
-        &mut self,
-        addr: MaybeRelocatable,
-        value: MaybeRelocatable,
-    ) -> Result<(), Error> {
-        self.memory.lock()?.index_set(addr.clone(), value.clone());
-        self.validate_memory_cell(addr, value)?;
-        Ok(())
+    pub fn index_set(&mut self, addr: MaybeRelocatable, value: MaybeRelocatable) {
+        self.memory
+            .borrow_mut()
+            .index_set(addr.clone(), value.clone());
+        self.validate_memory_cell(addr, value);
     }
 
-    fn validate_memory_cell(
-        &mut self,
-        addr: MaybeRelocatable,
-        _value: MaybeRelocatable,
-    ) -> Result<(), Error> {
+    fn validate_memory_cell(&mut self, addr: MaybeRelocatable, _value: MaybeRelocatable) {
         if let MaybeRelocatable::RelocatableValue(addr) = addr {
             if !self.validated_addresses.contains(&addr) {
                 if let Some(rules) = self.validation_rules.get(&addr.segment_index) {
                     for (rule, args) in rules.iter() {
                         let validated_addresses =
-                            (rule.inner)(&self.memory.as_ref().lock()?, &addr, args);
+                            (rule.inner)(&self.memory.as_ref().borrow(), &addr, args);
                         for addr in validated_addresses.into_iter() {
                             self.validated_addresses.insert(addr);
                         }
@@ -91,19 +77,5 @@ impl ValidatedMemoryDict {
                 }
             }
         }
-
-        Ok(())
-    }
-}
-
-impl From<MemoryDictError> for Error {
-    fn from(value: MemoryDictError) -> Self {
-        Self::MemoryDictError(value)
-    }
-}
-
-impl<T> From<PoisonError<T>> for Error {
-    fn from(_: PoisonError<T>) -> Self {
-        Self::MutexLockError
     }
 }

@@ -59,7 +59,7 @@ fn main() -> Result<(), Error> {
     )
     .unwrap();
 
-    runner.initialize_segments().unwrap();
+    runner.initialize_segments();
     let end = runner.initialize_main_entrypoint().unwrap();
 
     runner.initialize_vm(HashMap::new(), ()).unwrap();
