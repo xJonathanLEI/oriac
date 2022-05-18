@@ -526,13 +526,9 @@ impl VirtualMachine {
             let mut compiled_hints = vec![];
             for (hint_index, hint) in hints.iter().enumerate() {
                 let hint_id = self.hint_pc_and_index.len();
-                self.hint_pc_and_index.insert(
-                    hint_id.into(),
-                    (
-                        MaybeRelocatable::Int(pc.to_owned()) + &program_base,
-                        hint_index.into(),
-                    ),
-                );
+                let relocated_pc = MaybeRelocatable::Int(pc.to_owned()) + &program_base;
+                self.hint_pc_and_index
+                    .insert(hint_id.into(), (relocated_pc, hint_index.into()));
                 compiled_hints.push(CompiledHint {
                     compiled: rustpython_vm::compile::compile(
                         &hint.code,
