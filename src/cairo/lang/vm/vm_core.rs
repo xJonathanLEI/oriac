@@ -17,14 +17,20 @@ use crate::{
             vm_exceptions::PureValueError,
         },
     },
-    hint_support::StaticLocals,
+    hint_support::{
+        PyMemorySegmentManager, PyRelocatableValue, PyValidatedMemoryDict, StaticLocals,
+    },
 };
 
 use num_bigint::BigInt;
 use once_cell::unsync::OnceCell;
-use rustpython_vm::{Interpreter, PyObjectRef, PyPayload};
+use rustpython_vm::{
+    builtins::PyType,
+    class::{PyClassImpl, StaticType},
+    types::SetAttr,
+    Interpreter, PyPayload,
+};
 use std::{
-    borrow::BorrowMut,
     cell::RefCell,
     collections::{HashMap, HashSet},
     fmt::Debug,
@@ -77,7 +83,7 @@ pub struct VirtualMachine {
     pub debug_file_contents: (),
     pub error_message_attributes: (),
     pub program: Rc<Program>,
-    pub validated_memory: ValidatedMemoryDict,
+    pub validated_memory: Rc<RefCell<ValidatedMemoryDict>>,
     /// auto_deduction contains a mapping from a memory segment index to a list of functions (and a
     /// tuple of additional arguments) that may try to automatically deduce the value of memory
     /// cells in the segment (based on other memory cells).
@@ -285,7 +291,9 @@ impl VirtualMachine {
         // START: `VirtualMachineBase` ctor logic
         // //////////
 
-        let validated_memory = ValidatedMemoryDict::new(run_context.borrow().memory.clone());
+        let validated_memory = Rc::new(RefCell::new(ValidatedMemoryDict::new(
+            run_context.borrow().memory.clone(),
+        )));
 
         let mut vm = Self {
             prime: program.prime().clone(),
@@ -395,31 +403,73 @@ impl VirtualMachine {
 
                         // Injects hint context variables
                         {
+                            // Context injection
                             let ctx_segments = self.static_locals.segments.clone();
+                            let ctx_memory = self.validated_memory.clone();
+                            let ctx_ap = &self.run_context.borrow().ap;
 
-                            let memory_segment_manager_cls = vm.ctx.new_class(
-                                None,
-                                "MemorySegmentManager",
-                                &vm.ctx.types.object_type,
-                                Default::default(),
+                            // Class initialization
+                            let memory_segment_manager_cls = PyMemorySegmentManager::static_cell()
+                                .get_or_init(PyMemorySegmentManager::create_bare_type);
+                            let validated_memory_dict_cls = PyValidatedMemoryDict::static_cell()
+                                .get_or_init(PyValidatedMemoryDict::create_bare_type);
+                            PyRelocatableValue::static_cell()
+                                .get_or_init(PyRelocatableValue::create_bare_type);
+
+                            PyMemorySegmentManager::extend_class(
+                                &vm.ctx,
+                                memory_segment_manager_cls,
                             );
-                            memory_segment_manager_cls.set_str_attr(
-                                "add",
-                                vm.ctx.new_method(
-                                    "add",
-                                    memory_segment_manager_cls.clone(),
-                                    move |_self: PyObjectRef| {
-                                        ctx_segments.as_ref().borrow_mut().add(None);
-                                    },
+                            PyType::setattro(
+                                validated_memory_dict_cls,
+                                vm.ctx.new_str("__setitem__"),
+                                Some(
+                                    vm.ctx
+                                        .new_method(
+                                            "__setitem__",
+                                            validated_memory_dict_cls.clone(),
+                                            PyValidatedMemoryDict::py_setitem,
+                                        )
+                                        .into(),
                                 ),
-                            );
+                                vm,
+                            )
+                            .unwrap();
 
-                            let segments_obj =
-                                vm.ctx.new_base_object(memory_segment_manager_cls, None);
+                            // Hint locals injection
                             scope
                                 .globals
-                                .set_item("segments", segments_obj, vm)
+                                .set_item(
+                                    "segments",
+                                    PyMemorySegmentManager {
+                                        inner: ctx_segments,
+                                    }
+                                    .into_ref(vm)
+                                    .into(),
+                                    vm,
+                                )
                                 .unwrap();
+                            scope
+                                .globals
+                                .set_item(
+                                    "memory",
+                                    PyValidatedMemoryDict { inner: ctx_memory }
+                                        .into_ref(vm)
+                                        .into(),
+                                    vm,
+                                )
+                                .unwrap();
+
+                            let ap = match ctx_ap {
+                                MaybeRelocatable::Int(ap) => vm.ctx.new_int(ap.to_owned()).into(),
+                                MaybeRelocatable::RelocatableValue(ap) => PyRelocatableValue {
+                                    segment_index: vm.ctx.new_int(ap.segment_index.to_owned()),
+                                    offset: vm.ctx.new_int(ap.offset.to_owned()),
+                                }
+                                .into_ref(vm)
+                                .into(),
+                            };
+                            scope.globals.set_item("ap", ap, vm).unwrap();
                         }
 
                         match vm.run_code_obj(
@@ -753,14 +803,14 @@ impl VirtualMachine {
         // If op0 is set, this implies that we are going to set memory at op0_addr to that value.
         // Same for op1, dst.
         let dst_addr = self.run_context.borrow().compute_dst_addr(instruction);
-        let mut dst = self.validated_memory.get(&dst_addr, None);
+        let mut dst = self.validated_memory.borrow_mut().get(&dst_addr, None);
         let op0_addr = self.run_context.borrow().compute_op0_addr(instruction);
-        let mut op0 = self.validated_memory.get(&op0_addr, None);
+        let mut op0 = self.validated_memory.borrow_mut().get(&op0_addr, None);
         let op1_addr = self
             .run_context
             .borrow()
             .compute_op1_addr(instruction, op0.clone())?;
-        let mut op1 = self.validated_memory.get(&op1_addr, None);
+        let mut op1 = self.validated_memory.borrow_mut().get(&op1_addr, None);
 
         // res throughout this function represents the computation on op0,op1
         // as defined in decode.py.
@@ -839,14 +889,17 @@ impl VirtualMachine {
         // Write updated values.
         if should_update_dst {
             self.validated_memory
+                .borrow_mut()
                 .index_set(dst_addr.clone(), dst.clone());
         }
         if should_update_op0 {
             self.validated_memory
+                .borrow_mut()
                 .index_set(op0_addr.clone(), op0.clone());
         }
         if should_update_op1 {
             self.validated_memory
+                .borrow_mut()
                 .index_set(op1_addr.clone(), op1.clone());
         }
 
@@ -957,6 +1010,7 @@ impl VirtualMachine {
                             match (rule.inner)(self, addr, args) {
                                 Some(value) => self
                                     .validated_memory
+                                    .borrow_mut()
                                     .index_set(addr.to_owned().into(), value.into()),
                                 None => continue,
                             }
@@ -974,6 +1028,7 @@ impl VirtualMachine {
     pub fn verify_auto_deductions(&mut self) -> Result<(), VirtualMachineError> {
         let addrs = self
             .validated_memory
+            .borrow()
             .memory
             .as_ref()
             .borrow()
@@ -990,8 +1045,10 @@ impl VirtualMachine {
                         for (rule, args) in rules.iter() {
                             match (rule.inner)(self, &addr, args) {
                                 Some(value) => {
-                                    let current =
-                                        self.validated_memory.index(&addr.clone().into())?;
+                                    let current = self
+                                        .validated_memory
+                                        .borrow_mut()
+                                        .index(&addr.clone().into())?;
 
                                     // If the values are not the same, try using check_eq to
                                     // allow a subclass to override this result.
