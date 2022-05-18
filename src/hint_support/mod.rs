@@ -4,8 +4,7 @@ use crate::cairo::lang::vm::{
 };
 
 use rustpython_vm::{
-    builtins::{PyIntRef, PyTypeRef},
-    pyclass, pyimpl, Context, PyPayload, PyRef, VirtualMachine as PythonVm,
+    builtins::PyTypeRef, pyclass, pyimpl, Context, PyPayload, PyRef, VirtualMachine as PythonVm,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -17,8 +16,7 @@ pub struct StaticLocals {
 #[pyclass(name = "RelocatableValue", module = false)]
 #[derive(Debug, PyPayload)]
 pub struct PyRelocatableValue {
-    pub segment_index: PyIntRef,
-    pub offset: PyIntRef,
+    pub inner: RelocatableValue,
 }
 
 #[pyclass(name = "MemorySegmentManager", module = false)]
@@ -35,26 +33,21 @@ pub struct PyValidatedMemoryDict {
 
 #[pyimpl]
 impl PyRelocatableValue {
-    pub fn from_relocatable_value(value: &RelocatableValue, vm: &PythonVm) -> Self {
+    pub fn from_relocatable_value(value: &RelocatableValue) -> Self {
         Self {
-            segment_index: vm.ctx.new_bigint(&value.segment_index),
-            offset: vm.ctx.new_bigint(&value.offset),
+            inner: value.to_owned(),
         }
     }
 
     pub fn to_relocatable_value(&self) -> RelocatableValue {
-        RelocatableValue {
-            segment_index: self.segment_index.as_bigint().to_owned(),
-            offset: self.offset.as_bigint().to_owned(),
-        }
+        self.inner.to_owned()
     }
 }
 
 #[pyimpl]
 impl PyMemorySegmentManager {
     pub fn py_add(zelf: PyRef<Self>, vm: &PythonVm) -> PyRef<PyRelocatableValue> {
-        PyRelocatableValue::from_relocatable_value(&zelf.inner.borrow_mut().add(None), vm)
-            .into_ref(vm)
+        PyRelocatableValue::from_relocatable_value(&zelf.inner.borrow_mut().add(None)).into_ref(vm)
     }
 
     #[extend_class]

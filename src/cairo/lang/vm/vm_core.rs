@@ -462,12 +462,11 @@ impl VirtualMachine {
 
                             let ap = match ctx_ap {
                                 MaybeRelocatable::Int(ap) => vm.ctx.new_int(ap.to_owned()).into(),
-                                MaybeRelocatable::RelocatableValue(ap) => PyRelocatableValue {
-                                    segment_index: vm.ctx.new_int(ap.segment_index.to_owned()),
-                                    offset: vm.ctx.new_int(ap.offset.to_owned()),
+                                MaybeRelocatable::RelocatableValue(ap) => {
+                                    PyRelocatableValue::from_relocatable_value(ap)
+                                        .into_ref(vm)
+                                        .into()
                                 }
-                                .into_ref(vm)
-                                .into(),
                             };
                             scope.globals.set_item("ap", ap, vm).unwrap();
                         }
