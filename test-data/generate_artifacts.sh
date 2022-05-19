@@ -9,7 +9,7 @@ docker run -it --rm \
     --env "USER_ID=$(id -u)" \
     --env "GROUP_ID=$(id -g)" \
     --entrypoint "/entry.sh" \
-    shardlabs/cairo-cli:0.8.1
+    shardlabs/cairo-cli:0.8.2
 
 # Using prettier instead of `jq` due to known issue:
 #   https://github.com/xJonathanLEI/starknet-rs/issues/76#issuecomment-1058153538
