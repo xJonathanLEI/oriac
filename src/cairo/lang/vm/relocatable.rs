@@ -54,9 +54,12 @@ impl std::ops::Sub<&MaybeRelocatable> for MaybeRelocatable {
 
     fn sub(self, rhs: &MaybeRelocatable) -> Self::Output {
         match self {
-            MaybeRelocatable::Int(_) => {
-                panic!("unsupported operand type(s) for -: 'int' and 'RelocatableValue'")
-            }
+            MaybeRelocatable::Int(lhs) => match rhs {
+                MaybeRelocatable::Int(rhs) => MaybeRelocatable::Int(lhs - rhs),
+                MaybeRelocatable::RelocatableValue(_) => {
+                    panic!("unsupported operand type(s) for -: 'int' and 'RelocatableValue'")
+                }
+            },
             MaybeRelocatable::RelocatableValue(lhs) => lhs - rhs,
         }
     }
