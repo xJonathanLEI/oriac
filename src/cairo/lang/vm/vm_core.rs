@@ -397,7 +397,7 @@ impl VirtualMachine {
 
                 // This will almost always fail as globals injection has not been fully implemented
                 self.python_interpreter
-                    .get_or_init(Interpreter::default)
+                    .get_or_init(|| Interpreter::without_stdlib(Default::default()))
                     .enter(|vm| {
                         let scope = vm.new_scope_with_builtins();
 
@@ -471,13 +471,7 @@ impl VirtualMachine {
                             scope.globals.set_item("ap", ap, vm).unwrap();
                         }
 
-                        match vm.run_code_obj(
-                            rustpython_vm::builtins::PyCode::new(
-                                vm.map_codeobj(hint.compiled.clone()),
-                            )
-                            .into_ref(vm),
-                            scope,
-                        ) {
+                        match vm.run_code_obj(vm.ctx.new_code(hint.compiled.clone()), scope) {
                             Ok(value) => Ok(value),
                             Err(err) => {
                                 // unwrap() here should be safe
