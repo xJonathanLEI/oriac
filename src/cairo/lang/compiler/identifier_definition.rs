@@ -23,6 +23,7 @@ pub enum IdentifierDefinition {
     /// end
     ///```
     Struct,
+    TypeDefinition,
     Label {
         #[serde_as(as = "BigIntNumber")]
         pc: BigInt,
