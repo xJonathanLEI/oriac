@@ -1,0 +1,23 @@
+[package]
+name = "cairo-wasm"
+version = "0.0.0"
+authors = ["Tarrence van As <tarrence@vanas.family>"]
+license = "MIT OR Apache-2.0"
+edition = "2021"
+readme = "README.md"
+description = """
+Example usage of oriac from WASM
+"""
+keywords = ["ethereum", "starknet", "web3", "cairo"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+serde_json = "1.0.78"
+oriac = { git = "https://github.com/xJonathanLEI/oriac" }
+console_error_panic_hook = { version = "0.1.7", optional = true }
+wasm-bindgen = "0.2.79"

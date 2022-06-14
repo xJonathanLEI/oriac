@@ -1,0 +1,16 @@
+{
+  "name": "starknet-wasm",
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "build": "webpack",
+    "start": "webpack -w",
+    "server": "ws -d dist"
+  },
+  "devDependencies": {
+    "@wasm-tool/wasm-pack-plugin": "^1.6.0",
+    "html-webpack-plugin": "^5.5.0",
+    "local-web-server": "^2.6.0",
+    "webpack": "^5.70.0",
+    "webpack-cli": "^4.9.2"
+  }
+}
